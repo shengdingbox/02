@@ -1,0 +1,446 @@
+"""API 客户端 - CodeBuddy/WorkBuddy 积分查询、签到等
+
+两种认证模式：
+1. JWT 模式（旧）：使用 Keycloak JWT access_token + X-User-Id + X-Domain
+2. API Key 模式（新）：直接用 ck_xxx API Key 认证，更简单可靠
+
+推荐使用 API Key 模式（from_api_key()），不需要 JWT 刷新，不需要 X-User-Id。
+
+核心发现：
+- 积分/签到 API 的 base URL 是 https://copilot.tencent.com
+- 所有 /v2/billing/meter/* 接口必须使用 POST 方法
+- API Key 模式：只需 Authorization: Bearer {api_key} + Content-Type + Accept
+- JWT 模式：需要附加 X-User-Id 和 X-Domain 请求头
+
+API 响应格式：
+- 成功: {"code": 0, "msg": "OK", "data": {...}}
+- 失败: {"code": <error_code>, "msg": "<error_msg>"}
+
+数据结构（get-user-resource）：
+- data.Response.Data.Accounts[]: 资源包列表
+- 每个资源包包含: PackageName, CapacityRemain, CapacitySize, CycleStartTime 等
+"""
+
+import json
+import logging
+from datetime import datetime
+from typing import Optional
+
+import requests
+
+from ..models import Account, ResourcePackage, CheckinStatus
+
+logger = logging.getLogger(__name__)
+
+# === API 基础 URL ===
+# 关键：积分/签到 API 在 copilot.tencent.com，不在 codebuddy.cn
+BILLING_API_BASE = "https://copilot.tencent.com"
+
+# 公开 API 在 codebuddy.cn
+PUBLIC_API_BASE = "https://codebuddy.cn"
+
+# === API 路径 ===
+BILLING_API_PATHS = {
+    "user_resource": "/v2/billing/meter/get-user-resource",
+    "payment_type": "/v2/billing/meter/get-payment-type",
+    "checkin_status": "/v2/billing/meter/checkin-status",
+    "daily_checkin": "/v2/billing/meter/daily-checkin",
+    "dosage_notify": "/v2/billing/meter/get-dosage-notify",
+}
+
+PUBLIC_API_PATHS = {
+    "config": "/v3/config",
+    "activity_banner": "/v2/activity/banner",
+}
+
+# Keycloak token refresh 端点
+KEYCLOAK_TOKEN_URL = "https://www.codebuddy.cn/auth/realms/copilot/protocol/openid-connect/token"
+KEYCLOAK_CLIENT_ID = "console"
+
+
+class ApiClient:
+    """CodeBuddy/WorkBuddy 平台 API 客户端
+
+    支持两种认证模式：
+    1. API Key 模式（推荐）：from_api_key("ck_xxx") — 只需 API Key，更简单
+    2. JWT 模式（旧版）：from_account(account) — 需要 JWT token + uid + domain
+
+    使用方法：
+        # API Key 模式（推荐）
+        client = ApiClient.from_api_key("ck_xxxxxxxxxx")
+        result = client.get_user_resource()
+        result = client.daily_checkin()
+
+        # JWT 模式（旧版）
+        client = ApiClient(access_token=token, uid=uid, domain="www.codebuddy.cn")
+        result = client.get_user_resource()
+    """
+
+    def __init__(
+        self,
+        access_token: str,
+        uid: str = "",
+        domain: str = "www.codebuddy.cn",
+        refresh_token: str = "",
+        proxy: Optional[str] = None,
+        account: Optional[Account] = None,
+    ):
+        """初始化 API 客户端（JWT 模式）
+
+        Args:
+            access_token: Keycloak JWT access token 或 API Key (ck_xxx)
+            uid: 用户 UID（JWT 模式需要）
+            domain: 域名（JWT 模式需要，默认 www.codebuddy.cn）
+            refresh_token: Keycloak refresh token（用于自动刷新）
+            proxy: HTTP 代理地址
+            account: 可选的 Account 对象（用于兼容旧接口）
+        """
+        self.access_token = access_token
+        self.uid = uid
+        self.domain = domain
+        self.refresh_token = refresh_token
+        self.account = account
+
+        # 检测是否为 API Key 模式（ck_ 开头的直接用 API Key 认证）
+        self._is_api_key_mode = access_token.startswith("ck_")
+
+        # 创建 HTTP session
+        self.session = requests.Session()
+        # 禁用系统代理：Win11 默认开 PAC/TUN 代理会导致请求被拦截或 SSL 证书验证失败
+        self.session.trust_env = False
+        self.session.proxies = {"http": None, "https": None}
+
+        if self._is_api_key_mode:
+            # API Key 模式：简单请求头，只需 Authorization
+            self.session.headers.update({
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            })
+        else:
+            # JWT 模式：需要更多请求头
+            self.session.headers.update({
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            })
+            # X-User-Id / X-Domain 仅在值安全时设置
+            try:
+                uid.encode("latin-1")
+                self.session.headers["X-User-Id"] = uid
+            except UnicodeEncodeError:
+                logger.warning(f"UID 含非ASCII字符，跳过 X-User-Id header: {uid}")
+            try:
+                domain.encode("latin-1")
+                self.session.headers["X-Domain"] = domain
+            except UnicodeEncodeError:
+                logger.warning(f"Domain 含非ASCII字符，跳过 X-Domain header: {domain}")
+
+        if proxy:
+            self.session.proxies = {"http": proxy, "https": proxy}
+
+    @staticmethod
+    def from_api_key(api_key: str, proxy: Optional[str] = None) -> "ApiClient":
+        """从 API Key (ck_xxx) 创建客户端（推荐方式）
+
+        API Key 模式优势：
+        - 不需要 JWT token 刷新
+        - 不需要 X-User-Id / X-Domain 头
+        - 请求头简单，与官方一致
+
+        Args:
+            api_key: CodeBuddy API Key (ck_xxx 格式)
+            proxy: HTTP 代理地址
+
+        Returns:
+            ApiClient 实例
+        """
+        return ApiClient(
+            access_token=api_key,
+            uid="",
+            domain="",
+            proxy=proxy,
+        )
+
+    def _billing_request(self, path: str, body: dict = None, retry_on_401: bool = True) -> Optional[dict]:
+        """发送计费 API 请求（POST 方法）
+
+        Args:
+            path: API 路径（如 /v2/billing/meter/get-user-resource）
+            body: 请求体（默认空 JSON）
+            retry_on_401: 401 时是否尝试刷新 token 后重试
+
+        Returns:
+            响应 JSON 或 None
+        """
+        url = f"{BILLING_API_BASE}{path}"
+        try:
+            resp = self.session.post(url, json=body or {}, timeout=30)
+
+            if not resp.ok:
+                # 非2xx响应：签到接口400+code=10001是正常的"已签到"，用warning级别
+                is_checkin_already = (resp.status_code == 400 and "daily-checkin" in path)
+                log_level = logging.WARNING if is_checkin_already else logging.ERROR
+                logger.log(log_level, f"API 非2xx响应 [POST {path}] status={resp.status_code} body={resp.text[:500]}")
+
+                # 401 尝试刷新 token（仅 JWT 模式，API Key 模式无需刷新）
+                if resp.status_code == 401 and retry_on_401 and self.refresh_token and not self._is_api_key_mode:
+                    logger.info("收到 401，尝试刷新 token...")
+                    if self._refresh_token():
+                        self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+                        resp = self.session.post(url, json=body or {}, timeout=30)
+                        if not resp.ok:
+                            logger.error(f"API 重试仍失败 [POST {path}] status={resp.status_code} body={resp.text[:500]}")
+                    else:
+                        logger.warning("Token 刷新失败")
+                        return None
+
+                # 非 2xx 时尝试解析 JSON 响应体（服务端可能返回业务错误码）
+                if not resp.ok:
+                    try:
+                        result = resp.json()
+                        # 返回 JSON 让调用方自行判断业务错误码
+                        logger.info(f"非2xx但可解析JSON [POST {path}] code={result.get('code')} msg={result.get('msg')}")
+                        return result
+                    except Exception:
+                        resp.raise_for_status()
+                        return None
+
+            result = resp.json()
+
+            if result.get("code") != 0:
+                logger.error(f"API 返回错误 [{path}]: code={result.get('code')}, msg={result.get('msg')}")
+                return None
+
+            return result
+
+        except requests.RequestException as e:
+            logger.error(f"API 请求失败 [POST {path}]: {e}")
+            return None
+
+    def _refresh_token(self) -> bool:
+        """刷新 Keycloak access token
+
+        Returns:
+            是否刷新成功
+        """
+        if not self.refresh_token:
+            return False
+
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token,
+            "client_id": KEYCLOAK_CLIENT_ID,
+        }
+
+        try:
+            resp = self.session.post(KEYCLOAK_TOKEN_URL, data=data, timeout=15)
+            if resp.status_code == 200:
+                result = resp.json()
+                self.access_token = result["access_token"]
+                self.refresh_token = result.get("refresh_token", self.refresh_token)
+                logger.info("Token 刷新成功")
+                return True
+            else:
+                logger.warning(f"Token 刷新失败: {resp.status_code} {resp.text[:100]}")
+                return False
+        except Exception as e:
+            logger.error(f"Token 刷新异常: {e}")
+            return False
+
+    # === 积分查询 API ===
+
+    def get_user_resource(self) -> dict:
+        """获取用户资源包（积分）信息
+
+        返回的 Accounts 列表中每个元素包含：
+        - PackageName: 资源包名称（如 "CodeBuddy个人体验版"）
+        - PackageType: 资源包类型（1=免费, 2=付费, 4=体验）
+        - CapacityUnit: 单位（credits）
+        - CapacitySize: 总量
+        - CapacityRemain: 剩余
+        - CapacityUsed: 已用
+        - CycleStartTime / CycleEndTime: 当前计费周期
+        - CapacitySizePrecise / CapacityRemainPrecise / CapacityUsedPrecise: 精确值
+
+        Returns:
+            {"success": True, "packages": [...], "total_credits": int, "remaining_credits": int}
+            或 {"success": False, "error": str}
+        """
+        result = self._billing_request(BILLING_API_PATHS["user_resource"])
+        if not result:
+            return {"success": False, "error": "请求失败"}
+
+        try:
+            response_data = result.get("data", {}).get("Response", {}).get("Data", {})
+            accounts = response_data.get("Accounts", [])
+            total_count = response_data.get("TotalCount", 0)
+            total_dosage = response_data.get("TotalDosage", 0)
+
+            packages = []
+            total_credits = 0
+            remaining_credits = 0
+
+            for acc in accounts:
+                pkg = ResourcePackage(
+                    package_name=acc.get("PackageName", ""),
+                    package_type=str(acc.get("PackageType", "")),
+                    product_name=acc.get("ProductName", ""),
+                    sub_product_name=acc.get("SubProductName", ""),
+                    capacity_unit=acc.get("CapacityUnit", "credits"),
+                    capacity_size=float(acc.get("CapacitySizePrecise", acc.get("CapacitySize", 0))),
+                    capacity_remain=float(acc.get("CapacityRemainPrecise", acc.get("CapacityRemain", 0))),
+                    capacity_used=float(acc.get("CapacityUsedPrecise", acc.get("CapacityUsed", 0))),
+                    cycle_size=float(acc.get("CycleCapacitySizePrecise", acc.get("CycleCapacitySize", 0))),
+                    cycle_remain=float(acc.get("CycleCapacityRemainPrecise", acc.get("CycleCapacityRemain", 0))),
+                    cycle_start=acc.get("CycleStartTime", ""),
+                    cycle_end=acc.get("CycleEndTime", ""),
+                    status=acc.get("Status", 0),
+                    resource_id=acc.get("ResourceId", ""),
+                )
+                packages.append(pkg)
+
+                # 累加 credits
+                if pkg.capacity_unit == "credits":
+                    total_credits += pkg.cycle_size
+                    remaining_credits += pkg.cycle_remain
+
+            return {
+                "success": True,
+                "packages": packages,
+                "total_count": total_count,
+                "total_dosage": total_dosage,
+                "total_credits": total_credits,
+                "remaining_credits": remaining_credits,
+            }
+
+        except Exception as e:
+            logger.error(f"解析用户资源数据失败: {e}")
+            return {"success": False, "error": f"解析失败: {e}"}
+
+    def get_payment_type(self) -> dict:
+        """获取付费类型
+
+        Returns:
+            {"success": True, "payment_type": "free"|"pro"|"team"|"enterprise"}
+        """
+        result = self._billing_request(BILLING_API_PATHS["payment_type"])
+        if result:
+            data = result.get("data", {})
+            return {"success": True, "payment_type": data.get("paymentType", "unknown")}
+        return {"success": False, "error": "获取付费类型失败"}
+
+    def get_checkin_status(self) -> dict:
+        """获取签到状态
+
+        Returns:
+            CheckinStatus 的字典形式
+        """
+        result = self._billing_request(BILLING_API_PATHS["checkin_status"])
+        if not result:
+            return {"success": False, "error": "获取签到状态失败"}
+
+        try:
+            data = result.get("data", {})
+            status = CheckinStatus(
+                active=data.get("active", False),
+                today_checked_in=data.get("today_checked_in", False),
+                streak_days=data.get("streak_days", 0),
+                daily_credit=data.get("daily_credit", 0),
+                today_credit=data.get("today_credit", 0),
+                is_streak_day=data.get("is_streak_day", False),
+                next_streak_day=data.get("next_streak_day", 0),
+                streak_bonus_days=data.get("streak_bonus_days", 0),
+                streak_bonus_credit=data.get("streak_bonus_credit", 0),
+                week_checkin_days=data.get("week_checkin_days", 0),
+                week_progress=data.get("week_progress", [False]*7),
+                total_credits=data.get("total_credits", 0),
+                activity_name=data.get("activity_name", ""),
+            )
+            return {"success": True, "data": status}
+        except Exception as e:
+            logger.error(f"解析签到状态失败: {e}")
+            return {"success": False, "error": f"解析失败: {e}"}
+
+    def daily_checkin(self) -> dict:
+        """执行每日签到
+
+        API 行为：
+        - 签到成功: HTTP 200, code=0, data 含 credit/streak_days
+        - 今日已签到: HTTP 400, code=10001, msg="今天已签到，请明天再来"
+
+        Returns:
+            {"success": True, "credit": int, "streak_days": int}
+            {"success": True, "already": True}  -- 今日已签到
+            或 {"success": False, "error": str}
+        """
+        result = self._billing_request(BILLING_API_PATHS["daily_checkin"])
+        if not result:
+            return {"success": False, "error": "签到请求失败"}
+
+        code = result.get("code", -1)
+        msg = result.get("msg", "")
+
+        # 签到成功 (code=0)
+        if code == 0:
+            data = result.get("data", {})
+            return {
+                "success": True,
+                "credit": data.get("credit", 0),
+                "streak_days": data.get("streak_days", 0),
+                "is_streak_day": data.get("is_streak_day", False),
+            }
+
+        # 已签到：code=10001 是服务端返回的"今天已签到"错误码
+        if code == 10001:
+            logger.info(f"今日已签到: code={code}, msg={msg}")
+            return {"success": True, "already": True}
+
+        # 其他常见的已签到关键词检测
+        already_keywords = ["already", "已签", "已领", "重复签到", "今日已"]
+        if any(kw in msg.lower() for kw in [k.lower() for kw in already_keywords]):
+            logger.info(f"今日已签到(关键词): code={code}, msg={msg}")
+            return {"success": True, "already": True}
+
+        # 其他业务错误
+        logger.warning(f"签到返回业务错误: code={code}, msg={msg}")
+        return {"success": False, "error": f"签到失败: {msg} (code={code})"}
+
+    # === 兼容旧接口 ===
+
+    def checkin(self) -> dict:
+        """兼容旧接口 - 执行每日签到"""
+        result = self.daily_checkin()
+        if result["success"]:
+            return {"success": True, "data": result}
+        return result
+
+    def get_quota(self) -> dict:
+        """兼容旧接口 - 获取配额信息"""
+        return self.get_user_resource()
+
+    def verify_token(self) -> bool:
+        """验证 token 是否有效（通过获取付费类型来验证）"""
+        result = self._billing_request(BILLING_API_PATHS["payment_type"], retry_on_401=False)
+        return result is not None
+
+    @staticmethod
+    def from_account(account: Account, proxy: Optional[str] = None) -> "ApiClient":
+        """从 Account 对象创建 ApiClient
+
+        Args:
+            account: 账号对象
+            proxy: HTTP 代理地址
+
+        Returns:
+            ApiClient 实例
+        """
+        return ApiClient(
+            access_token=account.auth_token,
+            uid=account.uid,
+            domain=account.domain or "www.codebuddy.cn",
+            proxy=proxy,
+            account=account,
+        )

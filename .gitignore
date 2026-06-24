@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# 大文件（超过GitHub 100MB限制）
+update.zip
+update/
+*.zip
+
+# 运行时数据（含敏感信息：API Key、Token、账号信息）
+*.db
+proxy_db.json
+cookies/
+logs/
+*.log
+*.log.*
+
+# 备份文件
+*.bak
+*.bak.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 代码拷贝（历史备份目录）
+代码拷贝/
+
+# 测试临时文件
+tmp/
+temp/
+nul
+新建文件夹/
