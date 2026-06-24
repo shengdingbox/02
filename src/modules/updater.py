@@ -1,21 +1,15 @@
 """自动更新模块 - 检测新版本 + 下载 + 应用更新
 
 更新流程:
-1. 启动时 & 每小时检测 http://103.36.63.44:9680/version.json
+1. 启动时 & 每小时检测更新
+   - 优先查 GitHub Release API (https://api.github.com/repos/qinchangxv/antigravity-tools/releases/latest)
+   - GitHub 失败时 fallback 到旧服务器 (http://103.36.63.44:9680/version.json)
 2. 对比本地版本号 (src/VERSION)
-3. 有新版本 → 弹窗提示(含changelog) → 用户确认 → 下载update.zip
-4. 解压到临时目录 → 复制覆盖 src/ → 删除临时文件 → 重启
+3. 有新版本 → 弹窗提示(含changelog) → 用户确认 → 下载更新包
+4. 源码模式: 解压覆盖 src/ → 重启
+   打包模式: 提示用户手动下载安装
 
-version.json 支持分平台发布:
-{
-    "version": "1.3.0",
-    "platforms": {
-        "windows": { "version": "1.3.0", "changelog": "...", "download_url": "...", "sha256": "..." },
-        "mac": { "version": "1.2.0", "changelog": "...", "download_url": "...", "sha256": "..." }
-    }
-}
-Windows 只看 platforms.windows，Mac 只看 platforms.mac，互不干扰。
-如果某平台没有条目，不提示更新。
+双源策略保证旧版（只查服务器）和新版（优先GitHub）都能收到更新通知。
 """
 
 import json
@@ -32,7 +26,11 @@ from PySide6.QtCore import QObject, Signal, QTimer, Slot
 
 logger = logging.getLogger(__name__)
 
-# 更新服务器地址
+# ─── 更新源（双源策略：GitHub 优先，服务器兜底）───
+GITHUB_REPO = "qinchangxv/antigravity-tools"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+# 旧服务器（fallback）
 UPDATE_SERVER = "http://103.36.63.44:9680"
 VERSION_URL = f"{UPDATE_SERVER}/version.json"
 
@@ -54,6 +52,18 @@ def _get_platform_key() -> str:
     return "windows"
 
 
+def _get_platform_asset_keyword() -> str:
+    """GitHub Release asset 文件名关键词，用于匹配当前平台的下载包"""
+    if sys.platform == "darwin":
+        # macOS ARM 和 Intel 各有单独的包
+        import platform
+        machine = platform.machine().lower()
+        if machine == "arm64" or "arm" in machine:
+            return "macOS-ARM"
+        return "macOS-Intel"
+    return "Windows-x64"
+
+
 def _compare_versions(remote: str, local: str) -> bool:
     """比较版本号，remote > local 返回 True"""
     try:
@@ -68,18 +78,108 @@ def _compare_versions(remote: str, local: str) -> bool:
         return False
 
 
-def _fetch_version_info(timeout: int = 10) -> dict | None:
-    """从服务器获取版本信息"""
+def _fetch_github_release(timeout: int = 15) -> dict | None:
+    """从 GitHub Release API 获取最新版本信息
+
+    返回格式与旧服务器 version.json 兼容：
+    {
+        "version": "1.5.7",
+        "changelog": "...",
+        "download_url": "https://github.com/.../Antigravity-Tools-Windows-x64.zip",
+        "sha256": "",
+        "source": "github"
+    }
+    """
+    try:
+        import urllib.request
+        req = urllib.request.Request(GITHUB_API_URL)
+        req.add_header("User-Agent", "AntigravityTools/1.0")
+        req.add_header("Accept", "application/vnd.github+json")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        # 从 tag_name 提取版本号 (v1.5.7 → 1.5.7)
+        tag = data.get("tag_name", "")
+        version = tag.lstrip("v").strip()
+        if not version:
+            logger.warning("GitHub Release 无 tag_name")
+            return None
+
+        # changelog 用 release body
+        changelog = data.get("body", "") or f"v{version} 更新"
+
+        # 匹配当前平台的 asset
+        keyword = _get_platform_asset_keyword()
+        download_url = ""
+        for asset in data.get("assets", []):
+            asset_name = asset.get("name", "")
+            if keyword.lower() in asset_name.lower():
+                download_url = asset.get("browser_download_url", "")
+                break
+
+        if not download_url:
+            # 没找到对应平台的包，用 release 的 html_url 作为下载页
+            download_url = data.get("html_url", "")
+            logger.info(f"GitHub Release 无 {keyword} asset，使用 Release 页面 URL")
+
+        result = {
+            "version": version,
+            "changelog": changelog,
+            "download_url": download_url,
+            "sha256": "",
+            "source": "github",
+        }
+        logger.info(f"GitHub Release 检测到版本 {version}（源: GitHub）")
+        return result
+
+    except Exception as e:
+        logger.warning(f"GitHub Release 检测失败: {e}，尝试旧服务器")
+        return None
+
+
+def _fetch_server_version(timeout: int = 10) -> dict | None:
+    """从旧服务器获取版本信息（fallback）"""
     try:
         import urllib.request
         req = urllib.request.Request(VERSION_URL)
         req.add_header("User-Agent", "AntigravityTools/1.0")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+            data["source"] = "server"
+            logger.info(f"服务器检测到版本 {data.get('version', '?')}（源: 服务器）")
             return data
     except Exception as e:
-        logger.warning(f"检查更新失败: {e}")
+        logger.warning(f"服务器检查更新也失败: {e}")
         return None
+
+
+def _fetch_version_info(timeout: int = 15) -> dict | None:
+    """获取版本信息 — GitHub 优先，服务器兜底"""
+    # 1. 先查 GitHub Release
+    info = _fetch_github_release(timeout=timeout)
+    if info:
+        # GitHub 返回的是扁平结构，需要包装成 platforms 格式供下游处理
+        platform_key = _get_platform_key()
+        return {
+            "version": info["version"],
+            "platforms": {
+                platform_key: {
+                    "version": info["version"],
+                    "changelog": info["changelog"],
+                    "download_url": info["download_url"],
+                    "sha256": info.get("sha256", ""),
+                }
+            },
+            "source": "github",
+        }
+
+    # 2. GitHub 失败，查旧服务器
+    info = _fetch_server_version(timeout=timeout)
+    if info:
+        return info
+
+    logger.warning("所有更新源均不可用")
+    return None
 
 
 def _download_update(url: str, dest: Path, progress_callback=None, timeout: int = 300) -> bool:
@@ -282,14 +382,25 @@ class UpdateChecker(QObject):
         threading.Thread(target=_do_check, daemon=True).start()
 
     def download_and_apply(self, download_url: str, sha256: str = ""):
-        """下载并应用更新（后台线程）"""
+        """下载并应用更新（后台线程）
+
+        源码模式：下载 zip 解压覆盖 src/
+        打包模式：打开浏览器下载完整安装包
+        """
         if self._downloading:
             return
         self._downloading = True
 
         def _do_download():
             try:
-                # 下载到临时文件
+                # 打包模式：GitHub Release 下载的是完整安装包，打开浏览器让用户手动安装
+                if getattr(sys, 'frozen', False):
+                    import webbrowser
+                    webbrowser.open(download_url)
+                    self.update_finished.emit(True, f"已打开浏览器下载最新版本，请下载后手动安装。")
+                    return
+
+                # 源码模式：下载 zip 解压覆盖 src/
                 tmp_dir = Path(tempfile.gettempdir()) / "antigravity-update"
                 tmp_dir.mkdir(exist_ok=True)
                 zip_path = tmp_dir / "update.zip"
