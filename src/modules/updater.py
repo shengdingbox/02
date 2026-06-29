@@ -223,96 +223,144 @@ def _verify_sha256(file_path: Path, expected: str) -> bool:
 
 
 def _apply_frozen_update(zip_path: Path) -> bool:
-    """打包模式下的自动更新：下载新版本 zip → 解压 → 批处理替换 → 重启
+    """打包模式下的自动更新
 
-    流程：
-    1. 解压 zip 到临时目录
-    2. 找到新版本的 exe 和 _internal 目录
-    3. 生成批处理脚本：
-       - 等待旧进程退出（ping 延迟）
-       - robocopy 覆盖文件
-       - 启动新 exe
-       - 删除自身
-    4. 启动批处理（隐藏窗口）
-    5. 退出当前应用
+    Windows: 下载 zip → 批处理替换 → 重启
+    macOS: 下载 zip → ditto 覆盖 .app → 重启
     """
     import subprocess
 
     try:
-        # 当前 exe 路径
-        current_exe = Path(sys.executable)
-        app_dir = current_exe.parent  # dist/Antigravity Tools/
+        if sys.platform == "darwin":
+            return _apply_frozen_update_mac(zip_path)
+        else:
+            return _apply_frozen_update_windows(zip_path)
+    except Exception as e:
+        logger.error(f"打包模式更新失败: {e}")
+        return False
 
-        # 解压到临时目录
+
+def _apply_frozen_update_mac(zip_path: Path) -> bool:
+    """macOS 打包模式：ditto 覆盖 .app"""
+    import subprocess
+
+    try:
+        current_exe = Path(sys.executable)
+        app_path = current_exe
+        while app_path.parent.name != "" and not app_path.name.endswith(".app"):
+            app_path = app_path.parent
+        if not app_path.name.endswith(".app"):
+            for p in current_exe.parents:
+                if p.name.endswith(".app"):
+                    app_path = p
+                    break
+
+        if not app_path.name.endswith(".app"):
+            logger.error(f"无法定位 .app 目录，当前 exe: {current_exe}")
+            return False
+
+        logger.info(f"当前 .app 路径: {app_path}")
+
         with tempfile.TemporaryDirectory(prefix="ag_update_") as tmp_dir:
             tmp = Path(tmp_dir)
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(tmp)
 
-            # 找到解压后的 exe（可能在根目录或子目录下）
-            new_exe = None
-            new_internal = None
+            new_app = None
+            for app_dir in tmp.rglob("*.app"):
+                new_app = app_dir
+                break
 
-            # 查找 exe
+            if not new_app:
+                logger.error("更新包中未找到 .app 文件")
+                return False
+
+            logger.info(f"新版本 .app: {new_app}")
+
+            subprocess.run(["rm", "-rf", str(app_path)], capture_output=True, timeout=30)
+            result = subprocess.run(
+                ["ditto", str(new_app), str(app_path)],
+                capture_output=True, timeout=120
+            )
+            if result.returncode != 0:
+                logger.error(f"ditto 覆盖失败: {result.stderr.decode(errors='replace')[:200]}")
+                return False
+
+            exe_in_app = app_path / "Contents" / "MacOS" / "Antigravity Tools"
+            if exe_in_app.exists():
+                subprocess.run(["chmod", "+x", str(exe_in_app)], capture_output=True)
+
+        logger.info("macOS 更新覆盖成功")
+        return True
+
+    except Exception as e:
+        logger.error(f"macOS 打包模式更新失败: {e}")
+        return False
+
+
+def _apply_frozen_update_windows(zip_path: Path) -> bool:
+    """Windows 打包模式：批处理替换"""
+    import subprocess
+
+    try:
+        current_exe = Path(sys.executable)
+        app_dir = current_exe.parent
+
+        with tempfile.TemporaryDirectory(prefix="ag_update_") as tmp_dir:
+            tmp = Path(tmp_dir)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmp)
+
+            new_exe = None
             for exe_path in tmp.rglob("*.exe"):
                 if "Antigravity Tools" in exe_path.name or "antigravity" in exe_path.name.lower():
                     new_exe = exe_path
                     break
-
             if not new_exe:
-                # 如果没找到指定名称，找第一个 exe（排除 updater 脚本）
                 for exe_path in tmp.rglob("*.exe"):
                     new_exe = exe_path
                     break
-
             if not new_exe:
                 logger.error("更新包中未找到 exe 文件")
                 return False
 
             new_app_dir = new_exe.parent
 
-            # 生成批处理脚本
             bat_path = Path(tempfile.gettempdir()) / "ag_updater.bat"
             bat_content = f"""@echo off
 chcp 65001 >nul 2>&1
 timeout /t 2 /nobreak >nul
 
-:: 等待旧进程退出
 :wait_loop
 tasklist /fi "pid eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul
 if %errorlevel% == 0 goto wait_loop
 
-:: 再等1秒确保文件释放
 timeout /t 1 /nobreak >nul
 
-:: 用 robocopy 覆盖文件（/E 含子目录，/IS 覆盖相同文件，/IT 覆盖只读）
 robocopy "{new_app_dir}" "{app_dir}" /E /IS /IT /NFL /NDL /NJH /NJS /nc /ns /np
 
-:: 启动新版本
 start "" "{current_exe}"
 
-:: 删除批处理自身
 del "%~f0"
 """
 
             bat_path.write_text(bat_content, encoding="gbk", errors="replace")
 
-            # 启动批处理（隐藏窗口）
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0  # SW_HIDE
+            startupinfo.wShowWindow = 0
 
             subprocess.Popen(
                 ["cmd", "/c", str(bat_path)],
                 startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
 
             logger.info("更新批处理已启动，即将退出应用以完成更新")
             return True
 
     except Exception as e:
-        logger.error(f"打包模式更新失败: {e}")
+        logger.error(f"Windows 打包模式更新失败: {e}")
         return False
 
 
