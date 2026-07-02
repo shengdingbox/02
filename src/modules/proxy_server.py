@@ -95,8 +95,8 @@ MODEL_CONTEXT_LENGTHS = {
 
 MODEL_SUPPORTS_IMAGES = {
     "auto": True,
-    "glm-5.2": False,
-    "glm-5.1": False,
+    "glm-5.2": True,       # WorkBuddy 官方已支持图片输入
+    "glm-5.1": True,       # WorkBuddy 官方已支持图片输入
     "glm-5.0": False,
     "glm-5.0-turbo": False,
     "glm-5v-turbo": True,
@@ -195,43 +195,223 @@ def _detect_multimodal_images(request_data: dict) -> dict:
     }
 
 
-def _latest_user_message_index(messages: list) -> int:
-    for idx in range(len(messages) - 1, -1, -1):
-        msg = messages[idx]
-        if isinstance(msg, dict) and msg.get("role") == "user":
-            return idx
-    return -1
+# [v1.6.1-fix] 以下三个函数已无调用方（旧图片拦截逻辑移除后成为死代码）
+# [ROLLBACK] 恢复旧图片拦截逻辑时，取消注释这三个函数
+# def _latest_user_message_index(messages: list) -> int:
+#     for idx in range(len(messages) - 1, -1, -1):
+#         msg = messages[idx]
+#         if isinstance(msg, dict) and msg.get("role") == "user":
+#             return idx
+#     return -1
+#
+#
+# def _message_has_image(msg: dict) -> bool:
+#     if not isinstance(msg, dict):
+#         return False
+#     content = msg.get("content")
+#     if not isinstance(content, list):
+#         return False
+#     return any(_image_url_from_part(part) for part in content)
+#
+#
+# def _strip_historical_images_for_text_model(request_data: dict, latest_user_idx: int) -> dict:
+#     stripped = 0
+#     for idx, msg in enumerate(request_data.get("messages", [])):
+#         if idx == latest_user_idx or not isinstance(msg, dict):
+#             continue
+#         content = msg.get("content")
+#         if not isinstance(content, list):
+#             continue
+#         normalized = []
+#         changed = False
+#         for part in content:
+#             if _image_url_from_part(part):
+#                 stripped += 1
+#                 changed = True
+#                 normalized.append({"type": "text", "text": "[历史图片已省略]"})
+#             else:
+#                 normalized.append(part)
+#         if changed:
+#             msg["content"] = normalized
+#     return {"stripped_images": stripped}
 
 
-def _message_has_image(msg: dict) -> bool:
-    if not isinstance(msg, dict):
-        return False
-    content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(_image_url_from_part(part) for part in content)
+def _normalize_messages_for_upstream(messages: list) -> int:
+    """
+    [v1.6.1新增] 将 messages 中的图片 content part 归一化为标准 OpenAI image_url 格式。
 
+    原因：上游 copilot.tencent.com/v2 在纯 API 模式下只认 image_url 格式，
+    WorkBuddy 客户端发来的 input_image / image 格式需要转换。
 
-def _strip_historical_images_for_text_model(request_data: dict, latest_user_idx: int) -> dict:
-    stripped = 0
-    for idx, msg in enumerate(request_data.get("messages", [])):
-        if idx == latest_user_idx or not isinstance(msg, dict):
+    转换规则：
+      - image_url                        → 保持不变
+      - input_image/image (data+mediaType) → image_url + data URI
+      - input_image/image (url 字符串)     → image_url
+      - input_image/image (blob_ref 对象)  → 保持原样透传（不替换为文本）
+      - image_blob_ref (顶层)              → 保持原样透传（不替换为文本）
+      - 其他 type                         → 保持不变
+
+    返回值：归一化成功的图片 part 数量（用于日志统计）。
+
+    [ROLLBACK] 注释掉调用处（搜索 _normalize_messages_for_upstream）即可恢复原样透传。
+    """
+    normalized_count = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
             continue
         content = msg.get("content")
         if not isinstance(content, list):
             continue
-        normalized = []
-        changed = False
+        new_content = []
         for part in content:
-            if _image_url_from_part(part):
-                stripped += 1
-                changed = True
-                normalized.append({"type": "text", "text": "[历史图片已省略]"})
+            if not isinstance(part, dict):
+                new_content.append(part)
+                continue
+            part_type = part.get("type")
+            if part_type == "image_url":
+                # 已经是标准 OpenAI 格式，保持不变
+                new_content.append(part)
+            elif part_type in ("input_image", "image"):
+                image = part.get("image")
+                # image 是 blob_ref 对象（有 blob_id），保持原样透传
+                if isinstance(image, dict) and "blob_id" in image:
+                    new_content.append(part)
+                else:
+                    # 尝试提取 data URI（复用已有的 _image_url_from_part）
+                    url = _image_url_from_part(part)
+                    if url:
+                        new_content.append({"type": "image_url", "image_url": {"url": url}})
+                        normalized_count += 1
+                    else:
+                        new_content.append(part)
+            elif part_type == "image_blob_ref":
+                # 顶层 image_blob_ref，保持原样透传
+                new_content.append(part)
             else:
-                normalized.append(part)
-        if changed:
-            msg["content"] = normalized
-    return {"stripped_images": stripped}
+                new_content.append(part)
+        msg["content"] = new_content
+    return normalized_count
+
+
+def _extract_message_text(content) -> str:
+    """从 message content 中提取纯文本"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                elif part.get("content") and isinstance(part.get("content"), str):
+                    parts.append(part["content"])
+        return "\n".join(parts)
+    return ""
+
+
+def _find_following_assistant_description(messages: list, user_msg_index: int, max_chars: int = 1200) -> str:
+    """
+    找这条图片 user 消息之后最近的一条 assistant 回复，作为历史图片描述。
+    """
+    for i in range(user_msg_index + 1, len(messages)):
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        text = _extract_message_text(msg.get("content"))
+        if text:
+            text = text.strip()
+            if len(text) > max_chars:
+                text = text[:max_chars] + "...[已截断]"
+            return text
+    return "这是一张用户在前文上传过的图片，模型已经在后续回复中看过并分析过；原始图片数据已省略。"
+
+
+def _part_is_image(part: dict) -> bool:
+    """判断 content part 是否是图片"""
+    if not isinstance(part, dict):
+        return False
+    part_type = part.get("type", "")
+    if part_type in ("image_url", "input_image", "image", "image_blob_ref"):
+        return True
+    if "image_url" in part:
+        return True
+    if part_type in ("image", "input_image") and ("url" in part or "data" in part):
+        return True
+    return False
+
+
+def _strip_history_images_with_description(messages: list) -> list:
+    """
+    [v1.6.1新增] 历史图片替换成文本描述，只保留最后一条 user 消息的图片。
+
+    策略：
+    - 找最后一条 user 消息，它的图片保留原图
+    - 其他消息中的图片被移除，替换成「后续 assistant 回复的内容摘要」作为描述
+    - 描述来源：该图片所在 user 消息之后最近的一条 assistant 回复文本
+
+    [ROLLBACK] 注释掉调用处（搜索 _strip_history_images_with_description）即可恢复。
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    # 找最后一条 user 消息
+    last_user_index = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], dict) and messages[i].get("role") == "user":
+            last_user_index = i
+            break
+
+    if last_user_index < 0:
+        return messages
+
+    new_messages = []
+    stripped_total = 0
+
+    for msg_index, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            new_messages.append(msg)
+            continue
+
+        content = msg.get("content")
+        allow_images = msg_index == last_user_index and msg.get("role") == "user"
+
+        if not isinstance(content, list):
+            new_messages.append(msg)
+            continue
+
+        image_count = 0
+        new_content = []
+
+        for part in content:
+            if _part_is_image(part) and not allow_images:
+                image_count += 1
+                continue
+            new_content.append(part)
+
+        if image_count:
+            stripped_total += image_count
+            description = _find_following_assistant_description(messages, msg_index)
+            new_content.append({
+                "type": "text",
+                "text": (
+                    f"[历史图片描述，共 {image_count} 张：\n"
+                    f"{description}\n"
+                    f"]"
+                )
+            })
+
+        new_msg = dict(msg)
+        new_msg["content"] = new_content
+        new_messages.append(new_msg)
+
+    if stripped_total:
+        logger.info(f"[历史图片描述] 替换 {stripped_total} 张历史图片为文本描述")
+
+    return new_messages
 
 
 # 上游 API 路径（copilot.tencent.com/v2 使用 /chat/completions，不是 /v1/chat/completions）
@@ -539,6 +719,31 @@ class ProxyDatabase:
             self._dirty = True
             self._flush_to_disk()
 
+    def deduct_key_points(self, key_id: str, credit_used: float):
+        """实时扣除积分余额（本地估算，5分钟查分时用真实值修正）
+
+        从 points 字段 "剩余/总量" 中减去本次消耗的 credit。
+        如果 points 为空或格式不对，跳过（等查分修正）。
+        """
+        with self._lock:
+            for k in self._data.get("upstream_keys", []):
+                if k.get("key_id") != key_id:
+                    continue
+                points_str = k.get("points", "")
+                if not points_str or "/" not in points_str:
+                    break
+                try:
+                    remain_str, total_str = points_str.split("/")
+                    remain = float(remain_str)
+                    total = float(total_str)
+                    new_remain = max(0, remain - credit_used)
+                    k["points"] = f"{new_remain:.0f}/{total:.0f}"
+                    # 延迟写入（不需要立即写盘，5分钟查分时会立即写）
+                    self._save()
+                except (ValueError, IndexError):
+                    pass
+                break
+
     def get_total_points_for_sub_key(self, allowed_key_ids: list = None) -> float:
         """计算子 Key 可调用的所有上游 Key 的剩余积分总和
 
@@ -715,8 +920,16 @@ class ProxyDatabase:
                 }, timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()
-                    # 解析积分
+                    # 兼容两种响应结构：
+                    # 旧格式: {"accounts": [...]} (顶层)
+                    # 新格式: {"data":{"Response":{"Data":{"Accounts": [...]}}}}
                     accounts = data.get("accounts", [])
+                    if not accounts:
+                        # 尝试新格式
+                        try:
+                            accounts = data["data"]["Response"]["Data"]["Accounts"]
+                        except (KeyError, TypeError):
+                            accounts = []
                     # 关键防护：accounts 为空说明上游返回了异常数据（维护/限流/格式变更），
                     # 不能当成 0 分处理，否则会把所有 Key 全部误禁用
                     if not accounts:
@@ -726,15 +939,16 @@ class ProxyDatabase:
                     total_credits = 0.0
                     pkgs = []
                     for acc in accounts:
-                        remain = float(acc.get("cycle_remain", 0))
-                        total = float(acc.get("cycle_total", 0))
+                        # 兼容新旧字段名
+                        remain = float(acc.get("cycle_remain", acc.get("CycleCapacityRemain", acc.get("CapacityRemain", 0))))
+                        total = float(acc.get("cycle_total", acc.get("CycleCapacitySize", acc.get("CapacitySize", 0))))
                         total_remain += remain
                         total_credits += total
                         pkgs.append({
                             "cycle_remain": remain,
-                            "cycle_end": acc.get("cycle_end", ""),
-                            "package_name": acc.get("package_name", ""),
-                            "package_type": acc.get("package_type", ""),
+                            "cycle_end": acc.get("cycle_end", acc.get("CycleEndTime", "")),
+                            "package_name": acc.get("package_name", acc.get("PackageName", "")),
+                            "package_type": acc.get("package_type", acc.get("PackageType", "")),
                         })
                     self.sync_quota_to_key(api_key, total_remain, total_credits, packages=pkgs)
                     logger.info(f"[自动查分] Key {key_id} 积分更新: {total_remain:.0f}/{total_credits:.0f}")
@@ -1263,6 +1477,11 @@ class ProxyRouter:
             if key_id in self._concurrent_counts:
                 self._concurrent_counts[key_id] = max(0, self._concurrent_counts[key_id] - 1)
 
+    def get_concurrent_keys(self) -> dict:
+        """返回当前有并发请求的 key_id -> 并发数 字典（用于 UI 标记正在使用的 Key）"""
+        with self._lock:
+            return {k: v for k, v in self._concurrent_counts.items() if v > 0}
+
     def mark_key_exhausted(self, key_id: str):
         """标记 Key 为已耗尽（积分真正用完，不自动恢复）"""
         self._db.update_upstream_key(key_id, {"status": "exhausted"})
@@ -1558,7 +1777,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "object": "api.index",
                 "message": "Antigravity Proxy is running",
-                "version": "1.5.9",
+                "version": "1.6.1",
             })
             return
 
@@ -1645,7 +1864,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
+        # [v1.6.1-fix] 入站允许客户端发任意头（浏览器层放行），出站再由白名单丢弃
+        # 之前只允许 Authorization, Content-Type, Accept，WorkBuddy 预检带 X-Product-Version 会被挡
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -1720,39 +1941,52 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         model = request_data.get("model", "")
         if not model:
             model = "auto"  # 默认模型，让上游服务端路由
+            request_data["model"] = model  # [v1.6.1-fix] 写回 request_data，否则白名单转发时上游收不到 model
         # 与服务器端 chat.py 一致：messages 少于 2 条时补 system 消息
         # 上游 copilot.tencent.com 要求至少 2 条 message，否则返回 400
         messages = request_data.get("messages", [])
+        # [v1.6.1-fix] 严格校验 messages 类型，防止字符串/None/dict 导致后续 .insert() 崩溃
+        if not isinstance(messages, list) or not messages:
+            self._send_json(400, {"error": {"message": "messages is required and must be a non-empty array", "type": "invalid_request"}})
+            return
         if len(messages) < 2:
             messages.insert(0, {"role": "system", "content": "You are a helpful assistant."})
             request_data["messages"] = messages
 
-        latest_user_idx = _latest_user_message_index(messages)
-        latest_user_has_image = latest_user_idx >= 0 and _message_has_image(messages[latest_user_idx])
+        # [v1.6.1-fix] 旧的图片拦截逻辑已移除（模型能力检查 + 历史图片剥离）
+        # 原因：新的白名单制 + 图片格式归一化已覆盖所有场景，旧逻辑多余且可能误拦截
+        # [ROLLBACK] 恢复方法：把下面的代码取消注释
+        # latest_user_idx = _latest_user_message_index(messages)
+        # latest_user_has_image = latest_user_idx >= 0 and _message_has_image(messages[latest_user_idx])
+        # image_stats = _detect_multimodal_images(request_data)
+        # history_strip_stats = {"stripped_images": 0}
+        # if model in IMAGE_UNSUPPORTED_TEXT_MODELS and image_stats["image_count"] and not latest_user_has_image:
+        #     history_strip_stats = _strip_historical_images_for_text_model(request_data, latest_user_idx)
+        #     image_stats = _detect_multimodal_images(request_data)
+        #     if history_strip_stats["stripped_images"]:
+        #         logger.info(
+        #             f"[历史图片省略] model={model}, stripped_images={history_strip_stats['stripped_images']}"
+        #         )
+        # if latest_user_has_image and model in IMAGE_UNSUPPORTED_TEXT_MODELS:
+        #     error_detail = f"{model} 不支持图片输入，如需图片识别请切换到 glm-5v-turbo 模型"
+        #     logger.warning(
+        #         f"[图片拒绝] model={model}, images={image_stats['image_count']}, "
+        #         f"data_uri={image_stats['data_uri_count']}, max_image_chars={image_stats['max_image_chars']}"
+        #     )
+        #     self._add_log(event="error", sub_key=sub_key, model=model, error=error_detail, request_path="/v1/chat/completions")
+        #     self._send_json(400, {
+        #         "error": {
+        #             "message": error_detail,
+        #             "type": "unsupported_multimodal",
+        #             "code": "model_image_not_supported",
+        #         }
+        #     })
+        #     return
+        # ── 旧逻辑结束 ──
+
+        # 图片统计仍保留（用于日志），但不做拦截
         image_stats = _detect_multimodal_images(request_data)
         history_strip_stats = {"stripped_images": 0}
-        if model in IMAGE_UNSUPPORTED_TEXT_MODELS and image_stats["image_count"] and not latest_user_has_image:
-            history_strip_stats = _strip_historical_images_for_text_model(request_data, latest_user_idx)
-            image_stats = _detect_multimodal_images(request_data)
-            if history_strip_stats["stripped_images"]:
-                logger.info(
-                    f"[历史图片省略] model={model}, stripped_images={history_strip_stats['stripped_images']}"
-                )
-        if latest_user_has_image and model in IMAGE_UNSUPPORTED_TEXT_MODELS:
-            error_detail = f"{model} 不支持图片输入，如需图片识别请切换到 glm-5v-turbo 模型"
-            logger.warning(
-                f"[图片拒绝] model={model}, images={image_stats['image_count']}, "
-                f"data_uri={image_stats['data_uri_count']}, max_image_chars={image_stats['max_image_chars']}"
-            )
-            self._add_log(event="error", sub_key=sub_key, model=model, error=error_detail, request_path="/v1/chat/completions")
-            self._send_json(400, {
-                "error": {
-                    "message": error_detail,
-                    "type": "unsupported_multimodal",
-                    "code": "model_image_not_supported",
-                }
-            })
-            return
 
         # 4. 检查模型是否允许（透传模式跳过）
         if not is_passthrough:
@@ -1791,8 +2025,24 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 request_data=request_data,
             )
             if not upstream_key:
-                # 没有可用的 Key 了
-                logger.warning(f"[重试] 第{attempt}次：无可用的上游 Key")
+                # 没有可用的 Key 了 — 打印详细诊断信息
+                all_keys = self.router._cached_upstream_keys or []
+                active_count = sum(1 for k in all_keys if k.get("status") == "active")
+                excluded_count = len(tried_key_ids) if tried_key_ids else 0
+                cooldown_count = sum(1 for k in all_keys if k.get("status") == "cooldown")
+                # 检查模型级冷却
+                model_cooldown_count = 0
+                if model:
+                    for k in all_keys:
+                        kid = k.get("key_id", "")
+                        if kid and not self.router._is_key_schedulable_for_model(kid, model):
+                            model_cooldown_count += 1
+                logger.warning(
+                    f"[重试] 第{attempt}次：无可用的上游 Key | "
+                    f"总计={len(all_keys)} active={active_count} cooldown={cooldown_count} "
+                    f"excluded={excluded_count} model_cooldown={model_cooldown_count} "
+                    f"tried_key_ids={tried_key_ids}"
+                )
                 break
 
             key_id = upstream_key.get("key_id", "")
@@ -1803,16 +2053,20 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.router.increment_concurrent(key_id)
 
             try:
-                # ─── 构建请求头：纯 OpenAI 兼容 API 协议 ───
+                # ─── 构建请求头：纯 API 白名单制（v1.6.1 改动）───
+                # [v1.6.1-CHANGE] 请求头从「3件套(Content-Type+Authorization+X-Request-ID)」
+                #   改为白名单制(Content-Type+Accept+Authorization)，去掉 X-Request-ID(trace头)
+                # [ROLLBACK] 恢复方法：把 req_headers 改回
+                #   {"Content-Type": "application/json",
+                #    "Authorization": f"Bearer {upstream_api_key}",
+                #    "X-Request-ID": secrets.token_hex(16)}
                 upstream_api_key = upstream_key.get("api_key", "")
-
-                # 纯 API 协议头：只发上游 API 认证必需的头，不伪装 WorkBuddy 客户端
                 req_headers = {
                     "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
                     "Authorization": f"Bearer {upstream_api_key}",
-                    "X-Request-ID": secrets.token_hex(16),
                 }
-                logger.info(f"[代理] 使用纯 API 协议头（不透传客户端头）")
+                logger.info(f"[代理] 使用白名单 API 协议头（Content-Type+Accept+Authorization）")
 
                 # 检查客户端是否要流式
                 client_wants_stream = request_data.get("stream", False)
@@ -1821,6 +2075,36 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 # 请求上游返回 usage 统计（最后一个 chunk 包含 token/credit/缓存信息）
                 if not _skip_stream_options:
                     request_data.setdefault("stream_options", {})["include_usage"] = True
+
+                # ─── [v1.6.1-CHANGE] 请求体白名单制：删除非白名单字段 ───
+                # 原样透传会把客户端的未知字段带到上游，可能导致 400。
+                # 白名单只保留上游已知接受的字段，其余删除并记日志。
+                # [ROLLBACK] 注释掉这段 _allowed_body_fields 过滤即可恢复原样透传
+                _allowed_body_fields = {
+                    "model", "messages", "stream", "stream_options",
+                    "temperature", "top_p", "max_tokens", "presence_penalty",
+                    "frequency_penalty", "stop", "tools", "tool_choice", "response_format",
+                    # [v1.6.1-fix] 补充 OpenAI 兼容常用字段
+                    "parallel_tool_calls", "seed", "user", "metadata",
+                    "logprobs", "top_logprobs", "n",
+                }
+                _removed_fields = [k for k in list(request_data.keys()) if k not in _allowed_body_fields]
+                if _removed_fields:
+                    logger.info(f"[v1.6.1] 请求体白名单过滤，删除字段: {_removed_fields}")
+                    for _k in _removed_fields:
+                        del request_data[_k]
+
+                # ─── [v1.6.1-CHANGE] 历史图片替换为文本描述 ───
+                # 只保留最后一条 user 消息的图片，历史图片替换成后续 assistant 回复的摘要
+                # [ROLLBACK] 注释掉下面两行即可恢复（只保留 _normalize_messages_for_upstream）
+                request_data["messages"] = _strip_history_images_with_description(
+                    request_data.get("messages", [])
+                )
+
+                # ─── [v1.6.1-CHANGE] messages 图片格式归一化：input_image → image_url ───
+                # 上游纯 API 模式只认 image_url 格式，input_image 会被丢弃导致"读不了图"。
+                # [ROLLBACK] 注释掉下面这行即可恢复原样透传
+                _img_normalized = _normalize_messages_for_upstream(request_data.get("messages", []))
 
                 # 记录请求体大小和消息数（用于排查上下文超长问题）
                 msg_count = len(request_data.get("messages", []))
@@ -1833,7 +2117,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                            f"messages={msg_count}, body={body_size}B ({body_size//1024}KB), "
                            f"stream={client_wants_stream}, image={has_image}, images={image_stats['image_count']}, "
                            f"stripped_images={history_strip_stats['stripped_images']}, "
-                           f"stream_options={request_data.get('stream_options', 'N/A')}")
+                           f"stream_options={request_data.get('stream_options', 'N/A')}, "
+                           f"img_normalized={_img_normalized}")
 
                 # ─── 发送请求到上游 ───
                 session = self.router._get_session(upstream_url)
@@ -1906,28 +2191,14 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                         self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
                                       model=model, error=error_detail, upstream_status=401)
                     elif resp.status_code == 400 and not resp_body.strip():
-                        # 400 空 body：上下文太长，尝试压缩后重试
-                        if not _ctx_compressed[0]:
-                            logger.warning(f"[压缩] Key {label} 400空body，疑似上下文过长，尝试压缩")
-                            result = self._handle_context_too_long(
-                                request_data, upstream_key, model, upstream_url, _ctx_compressed)
-                            if result != "failed":
-                                tried_key_ids.discard(key_id)  # 允许同Key重试
-                                continue
-                        # 已压缩过还超，返回友好提示
-                        error_detail = f"Key {label} 上游返回 400 空 body，上下文过长"
-                        logger.warning(f"[拒绝] {error_detail}")
-                        self._add_log(event="end", sub_key=sub_key, upstream_key=upstream_key,
-                                      model=model, error="context_too_long")
-                        self._send_json(400, {
-                            "error": {
-                                "message": "当前对话上下文过长，超出上游限制。请新开一个对话继续。",
-                                "type": "context_too_long"
-                            }
-                        })
-                        return
+                        # 400 空 body：上游临时问题，不判定为上下文过长，直接换 Key 重试
+                        logger.warning(f"[重试] Key {label} 上游返回 400 空 body，换 Key 重试")
+                        self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
+                                      model=model, error="上游返回400空body", upstream_status=400)
+                        last_error = json.dumps({"error": {"message": "上游返回为空，请重试", "type": "upstream_empty_response"}})
+                        last_error_status = 502
                     elif resp.status_code == 400 and ("input length too long" in resp_body or '"code":11115' in resp_body):
-                        # 400 + "input length too long"：上下文超限，尝试压缩后重试
+                        # 400 + "input length too long"：上下文确实超限，尝试压缩后重试
                         if not _ctx_compressed[0]:
                             logger.warning(f"[压缩] Key {label} 400 input length too long，尝试压缩")
                             result = self._handle_context_too_long(
@@ -1958,7 +2229,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                             self.router.mark_key_abnormal(key_id)
                         elif resp.status_code == 400:
                             # 检测是否是 stream_options 不被支持导致的 400
-                            # 日志特征：code:11133 "invalid parameter value"，且请求体很小
+                            # 日志特征：code:11133 "invalid parameter value"
                             if "stream_options" in request_data and not _skip_stream_options and (
                                 "11133" in resp_body or "invalid parameter" in resp_body.lower()
                             ):
@@ -1970,13 +2241,27 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                                 _skip_stream_options = True
                                 continue  # 同 Key 重试（不加入 tried_key_ids）
                             # 400 但不是空body也不是 input length too long — 记录请求参数用于排查
-                            # 常见原因：stream_options 不被某些模型支持、参数格式错误
+                            # 常见原因：stream_options 不被某些模型支持、参数格式错误、上游节点偶发故障
                             req_params = {k: v for k, v in request_data.items()
                                          if k not in ("messages",)}
+                            # 检测消息中是否包含图片（排查图片相关 11133）
+                            msg_count = len(request_data.get("messages", []))
+                            has_image = any(
+                                isinstance(m.get("content"), list) and
+                                any(isinstance(p, dict) and p.get("type") == "image_url" for p in m["content"])
+                                for m in request_data.get("messages", [])
+                            )
                             logger.warning(f"[400排查] model={model}, key={label}, "
                                           f"resp={resp_body[:300]}, "
-                                          f"req_params(excl messages)={req_params}")
+                                          f"req_params(excl messages)={req_params}, "
+                                          f"messages={msg_count}, has_image={has_image}, "
+                                          f"stream_options_removed={_skip_stream_options}")
                             error_detail = f"Key {label} 上游返回 400: {resp_body[:200]}"
+                            # 记录到 DB 日志面板，方便用户排查原始 400 错误
+                            self._add_log(event="upstream_error", sub_key=sub_key, upstream_key=upstream_key,
+                                          model=model, error=error_detail, upstream_status=400)
+                            # 11133 可能是上游节点偶发故障（不是参数问题），换 Key 重试通常能解决
+                            # 不冷却该 Key（避免误伤），只标记 tried 换下一个 Key
                         else:
                             error_detail = f"Key {label} 上游返回 {resp.status_code}: {resp_body[:200]}"
                             logger.warning(f"[重试] {error_detail}")
@@ -2146,8 +2431,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 json=summary_request,
                 headers={
                     "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
                     "Authorization": f"Bearer {api_key}",
-                    "X-Request-ID": secrets.token_hex(16),
                 },
                 timeout=30,
                 stream=True,
@@ -2395,16 +2680,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 if chunk:
                     chunk_str = chunk.decode("utf-8", errors="replace")
                     _chunk_count += 1
-                    # 上下文超长检测（优化项 #4）
-                    if self._detect_stream_error(chunk_str) == "context_too_long":
-                        error_event = 'data: {"error": {"message": "当前对话上下文过长，超出模型限制。请新开一个对话继续。", "type": "context_too_long"}}\n\ndata: [DONE]\n\n'
-                        if not client_disconnected:
-                            try:
-                                self.request.sendall(error_event.encode("utf-8"))
-                            except (BrokenPipeError, ConnectionResetError, OSError):
-                                client_disconnected = True
-                        logger.warning("[代理] 流中检测到上下文超长，终止流")
-                        break
                     self._extract_usage(chunk_str, last_usage)
                     if '"usage"' in chunk_str and '"prompt_tokens"' in chunk_str:
                         _has_usage_chunk = True
@@ -2491,20 +2766,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                     except json.JSONDecodeError:
                         pass
 
-            # 检测上下文超长
-            all_content_str = "".join(content_parts)
-            if self._detect_stream_error(all_content_str) == "context_too_long":
-                self._send_json(400, {
-                    "error": {
-                        "message": "当前对话上下文过长，超出模型限制。请新开一个对话继续。",
-                        "type": "context_too_long"
-                    }
-                })
-                self._add_log(event="end", sub_key=sub_key, upstream_key=upstream_key,
-                              model=model, duration_ms=int((time.time() - start_time) * 1000),
-                              error="context_too_long")
-                return (False, "")
-
             full_content = "".join(content_parts)
             full_reasoning = "".join(reasoning_parts)
             result = {
@@ -2561,6 +2822,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                     cached_tokens=cached_t,
                     credits=credit,
                 )
+
+                # 实时扣除积分余额（本地估算，5分钟查分时用真实值修正）
+                if credit > 0:
+                    self.db.deduct_key_points(key_id, credit)
 
                 # 子 Key 统计（原子递增）— 透传模式没有真实子Key，跳过
                 if sub_key_id != "_passthrough_":

@@ -6,7 +6,8 @@ import subprocess
 import sys
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QSystemTrayIcon,
-    QMenu, QMessageBox, QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton
+    QMenu, QMessageBox, QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton,
+    QApplication,
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import Qt, QSize, Slot
@@ -357,6 +358,9 @@ class MainWindow(QMainWindow):
         """应用主题"""
         self._current_theme = theme
         stylesheet = get_stylesheet(theme)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(stylesheet)
         self.setStyleSheet(stylesheet)
 
     def _show_window(self):

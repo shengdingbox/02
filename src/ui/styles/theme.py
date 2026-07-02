@@ -27,10 +27,14 @@ LIGHT_THEME = {
     "border": "#E2E6EC",
     "border_light": "#EDF0F5",
     "shadow": "rgba(0,0,0,0.08)",
-    "sidebar_bg": "#1A1D23",
-    "sidebar_text": "#B0B8C4",
-    "sidebar_active": "#2B6CB0",
-    "sidebar_hover": "rgba(255,255,255,0.06)",
+    "sidebar_bg": "#FFFFFF",
+    "sidebar_text": "#5F6B7A",
+    "sidebar_logo": "#1A1D23",
+    "sidebar_border": "#E2E6EC",
+    "sidebar_active": "#E8F4FD",
+    "sidebar_active_text": "#2B6CB0",
+    "sidebar_hover": "#F0F2F5",
+    "sidebar_hover_text": "#1A1D23",
 }
 
 # 暗色主题
@@ -59,8 +63,12 @@ DARK_THEME = {
     "shadow": "rgba(0,0,0,0.3)",
     "sidebar_bg": "#12151A",
     "sidebar_text": "#9BA4B0",
+    "sidebar_logo": "#E8ECF1",
+    "sidebar_border": "rgba(255,255,255,0.05)",
     "sidebar_active": "#4DA3E8",
+    "sidebar_active_text": "#FFFFFF",
     "sidebar_hover": "rgba(255,255,255,0.04)",
+    "sidebar_hover_text": "#FFFFFF",
 }
 
 
@@ -134,12 +142,12 @@ def get_stylesheet(theme: str = "system") -> str:
         /* === 侧边栏 === */
         #sidebar {{
             background-color: {colors['sidebar_bg']};
-            border-right: 1px solid rgba(255,255,255,0.05);
+            border-right: 1px solid {colors['sidebar_border']};
             min-width: 220px;
             max-width: 220px;
         }}
         #sidebar_logo {{
-            color: {colors['text_inverse']};
+            color: {colors['sidebar_logo']};
             font-size: 18px;
             font-weight: 700;
             padding: 20px 16px 12px;
@@ -164,12 +172,17 @@ def get_stylesheet(theme: str = "system") -> str:
         }}
         QPushButton#nav_btn:hover {{
             background-color: {colors['sidebar_hover']};
-            color: #FFFFFF;
+            color: {colors['sidebar_hover_text']};
         }}
         QPushButton#nav_btn[active="true"] {{
             background-color: {colors['sidebar_active']};
-            color: #FFFFFF;
+            color: {colors['sidebar_active_text']};
             font-weight: 600;
+        }}
+        QFrame#sidebar_sep {{
+            background-color: {colors['sidebar_border']};
+            max-height: 1px;
+            margin: 8px 16px;
         }}
 
         /* === 页面内容区 === */
@@ -211,6 +224,15 @@ def get_stylesheet(theme: str = "system") -> str:
         QLabel#card_label {{
             color: {colors['text_tertiary']};
             font-size: 12px;
+        }}
+
+        QLabel#inline_hint {{
+            color: {colors['text_secondary']};
+            font-size: 12px;
+            padding: 4px 8px;
+            background-color: {colors['bg_secondary']};
+            border: 1px solid {colors['border_light']};
+            border-radius: 6px;
         }}
 
         /* === 按钮 === */
@@ -282,6 +304,20 @@ def get_stylesheet(theme: str = "system") -> str:
         QPushButton#icon_btn:hover {{
             background-color: {colors['bg_hover']};
         }}
+        QToolButton#ops_btn {{
+            background-color: transparent;
+            border: none;
+            color: {colors['accent']};
+            font-size: 12px;
+            padding: 2px 6px;
+        }}
+        QToolButton#ops_btn:hover {{
+            color: {colors['accent_hover']};
+            text-decoration: underline;
+        }}
+        QToolButton#ops_btn::menu-indicator {{
+            image: none;
+        }}
 
         /* === 输入框 === */
         QLineEdit {{
@@ -305,6 +341,12 @@ def get_stylesheet(theme: str = "system") -> str:
             border-radius: 8px;
             padding: 10px;
             color: {colors['text_primary']};
+        }}
+        QTextEdit#log_edit {{
+            color: {colors['text_secondary']};
+            font-size: 12px;
+            border-radius: 6px;
+            padding: 8px;
         }}
 
         /* === 下拉框 === */

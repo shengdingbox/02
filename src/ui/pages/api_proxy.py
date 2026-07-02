@@ -18,10 +18,11 @@ from PySide6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QMessageBox, QApplication
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal as QSignal, Signal
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QCursor, QColor, QBrush, QFont
 
 from ...i18n import t
 from ...utils.store import save_setting, load_setting, load_accounts
+from ..styles.theme import LIGHT_THEME, DARK_THEME
 from ...modules.proxy_server import (
     ProxyServer, SUPPORTED_MODELS, ProxyDatabase, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS
 )
@@ -62,6 +63,44 @@ def _set_item(table, row, col, text, tooltip=None):
         item.setToolTip(text)
     table.setItem(row, col, item)
     return item
+
+
+def _current_theme_colors() -> dict:
+    theme = load_setting("theme", "system")
+    if theme == "system":
+        app = QApplication.instance()
+        is_dark = bool(app and app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+        theme = "dark" if is_dark else "light"
+    return DARK_THEME if theme == "dark" else LIGHT_THEME
+
+
+def _style_popup_menu(menu):
+    colors = _current_theme_colors()
+    menu.setAttribute(Qt.WA_StyledBackground, True)
+    menu.setStyleSheet(f"""
+        QMenu {{
+            background-color: {colors['bg_card']};
+            color: {colors['text_primary']};
+            border: 1px solid {colors['border']};
+            border-radius: 8px;
+            padding: 4px;
+        }}
+        QMenu::item {{
+            background-color: transparent;
+            color: {colors['text_primary']};
+            padding: 8px 24px;
+            border-radius: 4px;
+        }}
+        QMenu::item:selected {{
+            background-color: {colors['accent_light']};
+            color: {colors['accent']};
+        }}
+        QMenu::separator {{
+            height: 1px;
+            background-color: {colors['border_light']};
+            margin: 4px 8px;
+        }}
+    """)
 
 
 def _apply_context_aliases(entry: dict, context_tokens: int):
@@ -545,7 +584,7 @@ class ApiProxyPage(QWidget):
 
         # 开放模式提示（默认隐藏）
         self._open_mode_hint = QLabel("")
-        self._open_mode_hint.setStyleSheet("color: #FC8181; font-size: 12px; padding: 4px 8px; background: #3B1C1C; border-radius: 4px;")
+        self._open_mode_hint.setStyleSheet("color: #FC8181; font-size: 12px; padding: 4px 8px; background: rgba(229,62,62,0.1); border-radius: 4px;")
         self._open_mode_hint.setWordWrap(True)
         self._open_mode_hint.setVisible(False)
         control_layout.addWidget(self._open_mode_hint)
@@ -727,12 +766,9 @@ class ApiProxyPage(QWidget):
         log_layout = QVBoxLayout(log_tab)
 
         self._log_edit = QTextEdit()
+        self._log_edit.setObjectName("log_edit")
         self._log_edit.setReadOnly(True)
-        self._log_edit.setStyleSheet(
-            "QTextEdit { color: #9BA4B0; font-size: 12px; "
-            "background: #1A202C; border: 1px solid #2D3748; border-radius: 6px; padding: 8px; "
-            "font-family: 'Consolas', 'Courier New', monospace; }"
-        )
+        self._log_edit.setFont(QFont("Consolas"))
         log_layout.addWidget(self._log_edit)
 
         log_toolbar = QHBoxLayout()
@@ -998,10 +1034,30 @@ class ApiProxyPage(QWidget):
             if self._proxy_server and self._proxy_server.is_running:
                 self._proxy_server.router._upstream_keys_cache_time = 0
 
+        # 获取当前正在使用的 Key（有并发请求的 Key）
+        concurrent_keys = {}
+        if self._proxy_server and self._proxy_server.is_running:
+            try:
+                concurrent_keys = self._proxy_server.router.get_concurrent_keys()
+            except Exception:
+                pass
+
         keys = self._db.get_upstream_keys()
 
         # 自动回填：对 points 为空的上游 Key，从账号已保存的积分数据中填充
         self._sync_points_from_accounts(keys)
+
+        # 排序：使用中置顶 → 最近使用 → 其他按原顺序
+        keys.sort(key=lambda k: (
+            0 if k.get("key_id", "") in concurrent_keys else 1,  # 使用中排最前
+            -(k.get("last_used_at", "") > ""),                    # 有使用时间的排前面
+            k.get("last_used_at", ""),                             # 按最近使用时间降序需要取负，这里用字符串逆序
+        ), reverse=False)
+        # last_used_at 是 ISO 字符串，字符串排序天然升序，需要单独逆序
+        keys.sort(key=lambda k: k.get("last_used_at", ""), reverse=True)
+        # 使用中的重新置顶（上面的排序会打乱）
+        if concurrent_keys:
+            keys.sort(key=lambda k: 0 if k.get("key_id", "") in concurrent_keys else 1)
 
         self._keys_table.setRowCount(len(keys))
 
@@ -1034,13 +1090,23 @@ class ApiProxyPage(QWidget):
                 "abnormal": "⚠️ 异常", "permanent_disabled": "⛔ 永久禁用",
             }
             status_text = status_map.get(status, status)
-            status_item = _set_item(self._keys_table, row, 2, status_text, tooltip=f"状态: {status}")
-            if status == "active":
+            # 正在使用的 Key 在状态文字后加并发数标记
+            if key_id in concurrent_keys:
+                concurrent_count = concurrent_keys[key_id]
+                status_text = f"🟢 使用中({concurrent_count})"
+            status_item = _set_item(self._keys_table, row, 2, status_text, tooltip=f"状态: {status}" + (f"，并发: {concurrent_count}" if key_id in concurrent_keys else ""))
+            if key_id in concurrent_keys:
+                # 正在使用的 Key 整行绿色背景标记
+                green_bg = QBrush(QColor(200, 255, 200))  # 浅绿色
+                for col in range(self._keys_table.columnCount()):
+                    item = self._keys_table.item(row, col)
+                    if item:
+                        item.setBackground(green_bg)
+            elif status == "active":
                 status_item.setForeground(Qt.darkGreen)
             elif status == "exhausted":
                 status_item.setForeground(Qt.red)
             elif status == "abnormal":
-                from PySide6.QtGui import QColor
                 status_item.setForeground(QColor("#E53E3E"))
 
             _set_item(self._keys_table, row, 3, str(used), tooltip=f"调用次数: {used:,}")
@@ -1058,7 +1124,6 @@ class ApiProxyPage(QWidget):
                         if pct <= 0:
                             points_item.setForeground(Qt.red)
                         elif pct < 20:
-                            from PySide6.QtGui import QColor
                             points_item.setForeground(QColor("#D69E2E"))
                         else:
                             points_item.setForeground(Qt.darkGreen)
@@ -1115,14 +1180,15 @@ class ApiProxyPage(QWidget):
 
             from PySide6.QtWidgets import QToolButton
             btn_ops = QToolButton()
+            btn_ops.setObjectName("ops_btn")
             btn_ops.setText("操作 ▾")
             btn_ops.setCursor(Qt.PointingHandCursor)
             btn_ops.setToolButtonStyle(Qt.ToolButtonTextOnly)
             btn_ops.setPopupMode(QToolButton.InstantPopup)
-            btn_ops.setStyleSheet("QToolButton{background:transparent;border:none;color:#3182CE;font-size:12px;padding:2px 6px;}QToolButton:hover{color:#2B6CB0;text-decoration:underline;}")
 
             from PySide6.QtWidgets import QMenu
             ops_menu = QMenu(btn_ops)
+            _style_popup_menu(ops_menu)
             if status != "active":
                 act = ops_menu.addAction("✅ 恢复")
                 act.triggered.connect(lambda checked, kid=key_id: self._reset_key(kid))
@@ -1360,8 +1426,8 @@ class ApiProxyPage(QWidget):
                             },
                             headers={
                                 "Content-Type": "application/json",
+                                "Accept": "application/json, text/event-stream",
                                 "Authorization": f"Bearer {api_key}",
-                                "X-Request-ID": "check_status_001",
                             },
                             timeout=30,
                             stream=True,
@@ -1636,14 +1702,15 @@ class ApiProxyPage(QWidget):
 
             from PySide6.QtWidgets import QToolButton
             btn_ops = QToolButton()
+            btn_ops.setObjectName("ops_btn")
             btn_ops.setText("操作 ▾")
             btn_ops.setCursor(Qt.PointingHandCursor)
             btn_ops.setToolButtonStyle(Qt.ToolButtonTextOnly)
             btn_ops.setPopupMode(QToolButton.InstantPopup)
-            btn_ops.setStyleSheet("QToolButton{background:transparent;border:none;color:#3182CE;font-size:12px;padding:2px 6px;}QToolButton:hover{color:#2B6CB0;text-decoration:underline;}")
 
             from PySide6.QtWidgets import QMenu
             ops_menu = QMenu(btn_ops)
+            _style_popup_menu(ops_menu)
             act = ops_menu.addAction("✏️ 编辑")
             act.triggered.connect(lambda checked, kid=sk_id: self._edit_sub_key(kid))
             act = ops_menu.addAction("📋 复制")
@@ -2290,7 +2357,9 @@ class ApiProxyPage(QWidget):
     def _refresh_tables_if_visible(self):
         """定时刷新表格（仅服务运行中时有效，积分实时更新需要从 db 读内存）"""
         if self.isVisible():
-            self._refresh_upstream_keys()
+            # 服务运行中时直接用 db 内存数据（积分/token/并发都在内存实时更新），
+            # 不从文件重载（否则会把延迟写入的新积分覆盖回旧值）
+            self._refresh_upstream_keys(reload_from_disk=not (self._proxy_server and self._proxy_server.is_running))
             self._refresh_sub_keys()
 
     def _cleanup(self):

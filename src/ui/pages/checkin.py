@@ -273,7 +273,7 @@ class CheckinPage(QWidget):
         self._btn_stop.setObjectName("secondary_btn")
         self._btn_stop.setStyleSheet(
             "QPushButton { color: #FC8181; border: 1px solid #FC8181; }"
-            "QPushButton:hover { background-color: #3B1C1C; }"
+            "QPushButton:hover { background-color: rgba(229,62,62,0.1); }"
         )
         self._btn_stop.setCursor(Qt.PointingHandCursor)
         self._btn_stop.setVisible(False)
@@ -358,12 +358,9 @@ class CheckinPage(QWidget):
 
         # 结果日志
         self._log_edit = QTextEdit()
+        self._log_edit.setObjectName("log_edit")
         self._log_edit.setReadOnly(True)
         self._log_edit.setMaximumHeight(150)
-        self._log_edit.setStyleSheet(
-            "QTextEdit { color: #9BA4B0; font-size: 12px; "
-            "background: #1A202C; border: 1px solid #2D3748; border-radius: 6px; padding: 8px; }"
-        )
         self._log_edit.setVisible(False)
         content_layout.addWidget(self._log_edit)
 
@@ -629,7 +626,7 @@ class CheckinPage(QWidget):
         self._btn_timer.setText("关闭定时")
         self._btn_timer.setStyleSheet(
             "QPushButton { color: #FC8181; border: 1px solid #FC8181; }"
-            "QPushButton:hover { background-color: #3B1C1C; }"
+            "QPushButton:hover { background-color: rgba(229,62,62,0.1); }"
         )
         self._time_edit.setEnabled(False)
         self._timer.start()

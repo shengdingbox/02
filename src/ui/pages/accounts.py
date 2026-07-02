@@ -859,7 +859,7 @@ class AccountsPage(QWidget):
         self._btn_stop_query.setObjectName("secondary_btn")
         self._btn_stop_query.setStyleSheet(
             "QPushButton { color: #FC8181; border: 1px solid #FC8181; }"
-            "QPushButton:hover { background-color: #3B1C1C; }"
+            "QPushButton:hover { background-color: rgba(229,62,62,0.1); }"
         )
         self._btn_stop_query.setCursor(Qt.PointingHandCursor)
         self._btn_stop_query.setVisible(False)
@@ -920,12 +920,9 @@ class AccountsPage(QWidget):
 
         # 查询日志
         self._log_edit = QTextEdit()
+        self._log_edit.setObjectName("log_edit")
         self._log_edit.setReadOnly(True)
         self._log_edit.setMaximumHeight(120)
-        self._log_edit.setStyleSheet(
-            "QTextEdit { color: #9BA4B0; font-size: 12px; "
-            "background: #1A202C; border: 1px solid #2D3748; border-radius: 6px; padding: 8px; }"
-        )
         self._log_edit.setVisible(False)
         content_layout.addWidget(self._log_edit)
 
@@ -2076,7 +2073,7 @@ class ServerFetchDialog(QDialog):
             "• 手机号----登录URL\n"
             "• 子API Key (sk_xxx)"
         )
-        hint.setStyleSheet("color: #9BA4B0; font-size: 12px; padding: 4px 8px; background: rgba(255,255,255,0.03); border-radius: 6px;")
+        hint.setObjectName("inline_hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
