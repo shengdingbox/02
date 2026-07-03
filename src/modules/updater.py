@@ -85,7 +85,7 @@ def _fetch_github_release(timeout: int = 15) -> dict | None:
 
     返回格式与旧服务器 version.json 兼容：
     {
-        "version": "1.6.1",
+        "version": "1.6.2",
         "changelog": "...",
         "download_url": "https://github.com/.../Antigravity-Tools-Windows-x64.zip",
         "sha256": "",
@@ -333,7 +333,7 @@ if (-not (Test-Path -LiteralPath '{src_dir}\\VERSION')) {{
 Remove-Item -LiteralPath '{tmp_dir}' -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath '{stable_copy}' -Recurse -Force -ErrorAction SilentlyContinue
 
-Start-Process -FilePath '{current_exe}'
+Start-Process -FilePath '{current_exe}' -WindowStyle Hidden
 
 Remove-Item -LiteralPath '{ps_path}' -Force -ErrorAction SilentlyContinue
 """
@@ -347,11 +347,13 @@ Remove-Item -LiteralPath '{ps_path}' -Force -ErrorAction SilentlyContinue
                 [
                     "powershell",
                     "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle", "Hidden",
                     "-ExecutionPolicy", "Bypass",
                     "-File", str(ps_path),
                 ],
                 startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
             )
 
             logger.info("Windows 增量更新 PowerShell 已启动")

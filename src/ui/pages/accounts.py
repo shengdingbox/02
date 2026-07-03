@@ -1954,12 +1954,21 @@ class AccountsPage(QWidget):
         except (json.JSONDecodeError, TypeError):
             pass  # 不是JSON，尝试文本格式
 
-        # 文本格式：每行一个 Token 或 API Key
+        # 文本格式：每行一个 Token 或 API Key，支持 "手机号----apikey" 格式
         tokens = []
         for line in content.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
+            if "----" in line:
+                # 格式：手机号----apikey
+                parts = line.split("----")
+                if len(parts) >= 2:
+                    phone = parts[0].strip().strip('"').strip("'")
+                    api_key = parts[1].strip().strip('"').strip("'")
+                    if phone and api_key:
+                        tokens.append({"phone": phone, "api_key": api_key})
+                        continue
             if "," in line:
                 for part in line.split(","):
                     part = part.strip().strip('"').strip("'")
@@ -1976,6 +1985,44 @@ class AccountsPage(QWidget):
 
         for token in tokens:
             try:
+                # 支持 "手机号----apikey" 格式（dict）
+                if isinstance(token, dict):
+                    phone = token["phone"]
+                    api_key = token["api_key"]
+                    uid = phone
+                    nickname = phone
+                    account = Account(
+                        uid=uid,
+                        nickname=nickname,
+                        platform=Platform.CODEBUDDY,
+                        auth_token=api_key,
+                        api_key=api_key,
+                    )
+                    save_account(account)
+                    # 导入上游池
+                    try:
+                        from ...modules.proxy_server import ProxyDatabase
+                        proxy_db = ProxyDatabase.get_instance()
+                        existing_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
+                        if api_key not in existing_keys:
+                            import secrets as _sec
+                            proxy_db.add_upstream_key({
+                                "key_id": f"ck_{_sec.token_hex(4)}",
+                                "api_key": api_key,
+                                "label": phone,
+                                "status": "active",
+                                "points": "",
+                                "points_updated_at": "",
+                                "packages": [],
+                                "created_at": "",
+                            })
+                            proxy_db._dirty = True
+                            proxy_db._flush_to_disk()
+                    except Exception:
+                        pass
+                    added += 1
+                    continue
+
                 # ck_ 开头按 API Key 处理
                 if token.startswith("ck_"):
                     uid = f"api_{token[3:11]}"

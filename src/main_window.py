@@ -445,6 +445,11 @@ class MainWindow(QMainWindow):
         """
         import subprocess
         try:
+            # [v1.6.1-fix] 隐藏 wmic 和 taskkill 的控制台窗口
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+
             # 用 wmic 查找带 --remote-debugging-pipe 的 msedge/chrome 进程
             # 这是 Playwright launch() 启动浏览器的标志性参数
             result = subprocess.run(
@@ -452,6 +457,8 @@ class MainWindow(QMainWindow):
                  "commandline like '%%--remote-debugging-pipe%%' and (name='msedge.exe' or name='chrome.exe')",
                  "get", "processid"],
                 capture_output=True, text=True, timeout=5,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             pids = []
             for line in result.stdout.strip().split("\n"):
@@ -464,7 +471,9 @@ class MainWindow(QMainWindow):
                 for pid in pids:
                     try:
                         subprocess.run(["taskkill", "/PID", pid, "/F"],
-                                       capture_output=True, timeout=3)
+                                       capture_output=True, timeout=3,
+                                       startupinfo=startupinfo,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
                         logger.debug(f"已关闭残留浏览器进程 PID={pid}")
                     except Exception:
                         pass
