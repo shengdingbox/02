@@ -164,11 +164,24 @@ def _fetch_server_version(timeout: int = 10) -> dict | None:
 
 
 def _fetch_version_info(timeout: int = 15) -> dict | None:
-    """获取版本信息 — GitHub 优先，服务器兜底"""
+    """获取版本信息 — GitHub 优先，服务器兜底
+
+    GitHub 拿到版本信息后，额外查服务器补充 src_download_url 作为下载备选。
+    这样下载增量包时可以先用 GitHub 链接，失败再切服务器链接。
+    """
     # 1. 先查 GitHub Release
     info = _fetch_github_release(timeout=timeout)
     if info:
         platform_key = _get_platform_key()
+        github_src_url = info.get("src_download_url", "")
+
+        # 额外查服务器拿 src_download_url 作为备选
+        server_src_url = ""
+        server_info = _fetch_server_version(timeout=8)
+        if server_info:
+            server_platform = server_info.get("platforms", {}).get(platform_key, {})
+            server_src_url = server_platform.get("src_download_url", "")
+
         return {
             "version": info["version"],
             "platforms": {
@@ -176,7 +189,8 @@ def _fetch_version_info(timeout: int = 15) -> dict | None:
                     "version": info["version"],
                     "changelog": info["changelog"],
                     "download_url": info["download_url"],
-                    "src_download_url": info.get("src_download_url", ""),
+                    "src_download_url": github_src_url,
+                    "src_download_url_fallback": server_src_url,
                     "sha256": info.get("sha256", ""),
                 }
             },
@@ -343,6 +357,12 @@ Remove-Item -LiteralPath '{ps_path}' -Force -ErrorAction SilentlyContinue
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0
 
+            # 用 -Command 方式执行，避免 -File 方式被执行策略拦截
+            # 把脚本内容编码为 Base64，避免中文路径编码问题
+            import base64
+            ps_bytes = ps_content.encode("utf-16-le")
+            ps_b64 = base64.b64encode(ps_bytes).decode("ascii")
+
             subprocess.Popen(
                 [
                     "powershell",
@@ -350,7 +370,7 @@ Remove-Item -LiteralPath '{ps_path}' -Force -ErrorAction SilentlyContinue
                     "-NonInteractive",
                     "-WindowStyle", "Hidden",
                     "-ExecutionPolicy", "Bypass",
-                    "-File", str(ps_path),
+                    "-EncodedCommand", ps_b64,
                 ],
                 startupinfo=startupinfo,
                 creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
@@ -588,6 +608,7 @@ class UpdateChecker(QObject):
 
     # 存储增量包 URL（检测到时保存，下载时用）
     _src_download_url = ""
+    _src_download_url_fallback = ""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -641,6 +662,7 @@ class UpdateChecker(QObject):
                 download_url = platform_info.get("download_url", "")
                 sha256 = platform_info.get("sha256", "")
                 self._src_download_url = platform_info.get("src_download_url", "")
+                self._src_download_url_fallback = platform_info.get("src_download_url_fallback", "")
             else:
                 # 兼容旧格式（无 platforms 字段）
                 remote_ver = info.get("version", "0.0.0")
@@ -648,6 +670,7 @@ class UpdateChecker(QObject):
                 download_url = info.get("download_url", "")
                 sha256 = info.get("sha256", "")
                 self._src_download_url = info.get("src_download_url", "")
+                self._src_download_url_fallback = info.get("src_download_url_fallback", "")
 
             if _compare_versions(remote_ver, current):
                 # 检查是否跳过了此版本
@@ -694,14 +717,26 @@ class UpdateChecker(QObject):
                     if self._src_download_url:
                         src_zip = tmp_dir / "update-src.zip"
                         logger.info(f"尝试增量更新: {self._src_download_url}")
-                        if _download_update(self._src_download_url, src_zip, _progress):
+                        if _download_update(self._src_download_url, src_zip, _progress, timeout=60):
                             if _apply_src_only_update(src_zip):
                                 self.update_finished.emit(True, "UPDATE_NEED_RESTART")
                                 return
                             else:
                                 logger.warning("增量更新失败，回退到完整包")
                         else:
-                            logger.warning("增量包下载失败，回退到完整包")
+                            # GitHub 下载失败，尝试服务器备选链接
+                            if self._src_download_url_fallback and self._src_download_url_fallback != self._src_download_url:
+                                logger.info(f"GitHub 下载失败，尝试服务器: {self._src_download_url_fallback}")
+                                if _download_update(self._src_download_url_fallback, src_zip, _progress, timeout=120):
+                                    if _apply_src_only_update(src_zip):
+                                        self.update_finished.emit(True, "UPDATE_NEED_RESTART")
+                                        return
+                                    else:
+                                        logger.warning("增量更新失败，回退到完整包")
+                                else:
+                                    logger.warning("增量包下载失败，回退到完整包")
+                            else:
+                                logger.warning("增量包下载失败，回退到完整包")
 
                     # 完整包更新
                     zip_path = tmp_dir / "update.zip"
