@@ -138,6 +138,9 @@ hiddenimports = [
     'greenlet',
     'pyee',
     'pyee._base',
+    # [v1.6.7-fix] app.py 用 importlib 动态加载 src，PyInstaller 静态分析跟踪不到 src/ 的 import
+    'sqlite3',
+    '_sqlite3',
 ]
 
 # ─── 二进制文件 ───
