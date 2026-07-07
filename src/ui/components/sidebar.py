@@ -18,7 +18,7 @@ def _get_version() -> str:
                 return f"v{f.read().strip()}"
         except Exception:
             pass
-    return "v1.6.7"
+    return "v1.7.8"
 
 
 # 导航项定义： (id, 图标emoji, 标签)

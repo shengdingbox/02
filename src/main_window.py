@@ -362,6 +362,13 @@ class MainWindow(QMainWindow):
         if app:
             app.setStyleSheet(stylesheet)
         self.setStyleSheet(stylesheet)
+        # 通知各页面刷新动态颜色（硬编码样式的控件需要手动更新）
+        for page in self._pages.values():
+            if hasattr(page, "apply_theme"):
+                try:
+                    page.apply_theme()
+                except Exception:
+                    pass
 
     def _show_window(self):
         """显示窗口"""

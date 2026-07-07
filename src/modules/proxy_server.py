@@ -21,7 +21,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from typing import Optional
@@ -57,13 +57,17 @@ SUPPORTED_MODELS = [
     # MiniMax
     "minimax-m3", "minimax-m2.7", "minimax-m2.5",
     # Kimi
-    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7-code",
+    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7",
     # 混元
     "hy3", "hy3-preview", "hunyuan-chat", "hunyuan-2.0-thinking",
 ]
 
 # 模型上下文长度（maxInputTokens），用于 WorkBuddy 客户端判断是否需要压缩上下文
 # 如果 /v1/models 不返回此字段，WorkBuddy 无法知道模型上下文限制，不会触发自动压缩
+MODEL_ID_ALIASES = {
+    "kimi-k2.7-code": "kimi-k2.7",
+}
+
 MODEL_CONTEXT_LENGTHS = {
     "auto": 168000,                    # 官方虚拟模型，服务端动态选模型；与 dist 一致
     # DeepSeek 系列
@@ -88,7 +92,7 @@ MODEL_CONTEXT_LENGTHS = {
     # Kimi
     "kimi-k2.6": 256000,               # 256K
     "kimi-k2.5": 1000000,              # 百万级上下文
-    "kimi-k2.7-code": 256000,          # 256K
+    "kimi-k2.7": 256000,               # 256K
     # 混元
     "hy3": 256000,                     # 256K
     "hy3-preview": 256000,             # 256K
@@ -107,7 +111,7 @@ MODEL_SUPPORTS_IMAGES = {
     "glm-4.7": True,
     "glm-4.6": True,
     # 新增模型
-    "kimi-k2.7-code": True,
+    "kimi-k2.7": True,
     "hy3": True,
 }
 
@@ -121,7 +125,7 @@ MODEL_MAX_OUTPUT_TOKENS = {
     "glm-4.7": 131072,
     "glm-4.6": 131072,
     # 新增模型
-    "kimi-k2.7-code": 131072,
+    "kimi-k2.7": 131072,
     "hy3": 131072,
 }
 
@@ -842,6 +846,7 @@ class ProxyDatabase:
         self._dirty = False  # 是否有未保存的变更
         self._save_timer = None  # 延迟保存定时器
         self._key_status_version = 0  # Key 状态变更版本号，每次状态变化 +1，ProxyRouter 据此刷新缓存
+        self._sub_key_version = 0  # 子 Key 变更版本号，每次增删改 +1，ProxyRouter 据此刷新认证缓存
 
     def _load(self) -> dict:
         """从文件加载数据（带重试，读取失败时重试而非返回空数据）"""
@@ -1092,6 +1097,7 @@ class ProxyDatabase:
     def add_sub_api_key(self, key_data: dict):
         with self._lock:
             self._data.setdefault("sub_api_keys", []).append(key_data)
+            self._sub_key_version += 1
             self._save()
 
     def update_sub_api_key(self, key_id: str, updates: dict):
@@ -1100,6 +1106,7 @@ class ProxyDatabase:
             for k in keys:
                 if k.get("key_id") == key_id:
                     k.update(updates)
+                    self._sub_key_version += 1
                     break
             self._save()
 
@@ -1200,6 +1207,78 @@ class ProxyDatabase:
         today = datetime.now().strftime("%Y-%m-%d")
         with self._lock:
             return dict(self._data.get("daily_stats", {}).get(category, {}).get(key_id, {}).get(today, {}))
+
+    def get_usage_summary(self, days: int = None) -> dict:
+        """获取使用情况汇总统计
+
+        Args:
+            days: None=总计（从 upstream_keys 的累计字段汇总）
+                  1=今日
+                  N=近N天
+
+        Returns:
+            {
+                "prompt_tokens": int,       # 上行Token
+                "completion_tokens": int,   # 下行Token
+                "total_tokens": int,        # 总Token
+                "cached_tokens": int,       # 缓存命中Token
+                "credits": float,           # 消耗积分
+                "count": int,               # 请求数量
+                "cache_hit_rate": float,    # 缓存命中率(0~1)，= cached_tokens / prompt_tokens
+            }
+        """
+        result = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "credits": 0.0,
+            "count": 0,
+            "cache_hit_rate": 0.0,
+        }
+
+        with self._lock:
+            if days is None:
+                # 总计：从 upstream_keys 累计字段汇总
+                for k in self._data.get("upstream_keys", []):
+                    result["prompt_tokens"] += k.get("total_prompt_tokens", 0)
+                    result["completion_tokens"] += k.get("total_completion_tokens", 0)
+                    result["total_tokens"] += k.get("total_tokens", 0)
+                    result["cached_tokens"] += k.get("total_cached_tokens", 0)
+                    result["credits"] += k.get("total_credits", 0.0)
+                    result["count"] += k.get("used_count", 0)
+            else:
+                # 今日或近N天：从 daily_stats 汇总
+                today = datetime.now()
+                if days == 1:
+                    date_list = [today.strftime("%Y-%m-%d")]
+                else:
+                    date_list = [
+                        (today - timedelta(days=i)).strftime("%Y-%m-%d")
+                        for i in range(days)
+                    ]
+
+                upstream_stats = self._data.get("daily_stats", {}).get("upstream", {})
+                for key_id, dates in upstream_stats.items():
+                    for date_str in date_list:
+                        day_data = dates.get(date_str)
+                        if day_data:
+                            result["prompt_tokens"] += day_data.get("prompt_tokens", 0)
+                            result["completion_tokens"] += day_data.get("completion_tokens", 0)
+                            result["total_tokens"] += day_data.get("total_tokens", 0)
+                            result["cached_tokens"] += day_data.get("cached_tokens", 0)
+                            result["credits"] += day_data.get("credits", 0.0)
+                            result["count"] += day_data.get("count", 0)
+
+        # 计算缓存命中率 = cached_tokens / prompt_tokens
+        if result["prompt_tokens"] > 0:
+            result["cache_hit_rate"] = result["cached_tokens"] / result["prompt_tokens"]
+
+        # 积分保留4位小数
+        result["credits"] = round(result["credits"], 4)
+
+        return result
+
     _points_query_timestamps: dict = {}  # {key_id: last_query_epoch}
 
     def refresh_key_points_if_needed(self, key_id: str):
@@ -1298,10 +1377,13 @@ class ProxyDatabase:
 
     def delete_sub_api_key(self, key_id: str):
         with self._lock:
+            before = len(self._data.get("sub_api_keys", []))
             self._data["sub_api_keys"] = [
                 k for k in self._data.get("sub_api_keys", [])
                 if k.get("key_id") != key_id
             ]
+            if len(self._data["sub_api_keys"]) != before:
+                self._sub_key_version += 1
             self._save()
 
     # === 设置 ===
@@ -1370,6 +1452,7 @@ class ProxyRouter:
         self._cached_sub_keys: dict[str, dict] = {}
         self._sub_keys_cache_time: float = 0
         self._SUB_KEYS_CACHE_TTL = 10.0  # 10秒缓存
+        self._last_sub_key_version: int = -1
         # 粘性会话（优化项 #5/#7）：{session_hash: (key_id, expire_ts)} TTL 1h
         self._sticky_sessions: dict[str, tuple] = {}
         # 模型级冷却（优化项 #8/#10）：{key_id: {model: expire_ts}}
@@ -1887,6 +1970,7 @@ class ProxyRouter:
         self._upstream_keys_cache_time = 0
         self._cached_sub_keys = {}
         self._sub_keys_cache_time = 0
+        self._last_sub_key_version = -1
 
     def authenticate_sub_key(self, token: str) -> Optional[dict]:
         """验证子 API Key（带缓存，避免每次请求遍历+加锁）
@@ -1894,13 +1978,18 @@ class ProxyRouter:
         缓存 token -> sub_key 映射 10 秒，认证从 O(n) + DB锁 变成 O(1) dict 查找。
         """
         now = time.time()
-        if not self._cached_sub_keys or (now - self._sub_keys_cache_time) > self._SUB_KEYS_CACHE_TTL:
-            sub_keys = self._db.get_sub_api_keys()
-            self._cached_sub_keys = {}
-            for sk in sub_keys:
-                if sk.get("api_key") and sk.get("is_active", True):
-                    self._cached_sub_keys[sk["api_key"]] = sk
-            self._sub_keys_cache_time = now
+        with self._cache_lock:
+            db_version = self._db._sub_key_version
+            cache_expired = (now - self._sub_keys_cache_time) > self._SUB_KEYS_CACHE_TTL
+            version_changed = db_version != self._last_sub_key_version
+            if not self._cached_sub_keys or cache_expired or version_changed:
+                sub_keys = self._db.get_sub_api_keys()
+                self._cached_sub_keys = {}
+                for sk in sub_keys:
+                    if sk.get("api_key") and sk.get("is_active", True):
+                        self._cached_sub_keys[sk["api_key"]] = sk
+                self._sub_keys_cache_time = now
+                self._last_sub_key_version = db_version
         
         return self._cached_sub_keys.get(token)
 
@@ -2053,6 +2142,15 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if result:
             return result
 
+        # Generated proxy keys are authoritative. If a sk-* key is not found,
+        # it was deleted/disabled or never existed, so local passthrough must
+        # not silently grant access.
+        if token.startswith("sk-"):
+            if not quiet:
+                client_ip = self._get_client_ip()
+                logger.warning(f"[认证] 子Key不存在或已删除, token=...{token[-6:] if len(token) > 6 else token}, client={client_ip}")
+            return None
+
         # 开放模式：不匹配子Key → 直接拒绝，不创建虚拟透传子Key
         if self.server_mode == "open":
             if not quiet:
@@ -2089,7 +2187,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "object": "api.index",
                 "message": "Antigravity Proxy is running",
-                "version": "1.6.7",
+                "version": "1.7.8",
             })
             return
 
@@ -2108,7 +2206,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 logger.info(f"[透传] /v1/models 无Bearer token，返回全部模型")
                 sub_key = {"allowed_models": []}
             allowed_models = sub_key.get("allowed_models", [])
-            model_list = SUPPORTED_MODELS if not allowed_models else [m for m in SUPPORTED_MODELS if m in allowed_models]
+            normalized_allowed_models = [MODEL_ID_ALIASES.get(str(m).strip(), str(m).strip()) for m in allowed_models]
+            model_list = SUPPORTED_MODELS if not normalized_allowed_models else [m for m in SUPPORTED_MODELS if m in normalized_allowed_models]
             models_data = {
                 "object": "list",
                 "data": [
@@ -2244,6 +2343,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if not model:
             model = "auto"  # 默认模型，让上游服务端路由
             request_data["model"] = model  # [v1.6.1-fix] 写回 request_data，否则白名单转发时上游收不到 model
+        else:
+            original_model = str(model).strip()
+            aliased_model = MODEL_ID_ALIASES.get(original_model, original_model)
+            if aliased_model != original_model:
+                logger.info(f"[模型别名] {original_model} -> {aliased_model}")
+                model = aliased_model
+                request_data["model"] = model
         # 与服务器端 chat.py 一致：messages 少于 2 条时补 system 消息
         # 上游 copilot.tencent.com 要求至少 2 条 message，否则返回 400
         messages = request_data.get("messages", [])
@@ -2289,7 +2395,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         # 4. 检查模型是否允许（透传模式跳过）
         if not is_passthrough:
             allowed_models = sub_key.get("allowed_models", [])
-            if allowed_models and model not in allowed_models:
+            normalized_allowed_models = [MODEL_ID_ALIASES.get(str(m).strip(), str(m).strip()) for m in allowed_models]
+            if normalized_allowed_models and model not in normalized_allowed_models:
                 # 用 503 代替 403，避免触发 WorkBuddy 认证流程
                 error_detail = f"模型 {model} 不允许, 允许: {allowed_models}"
                 logger.warning(f"[模型] {error_detail}")
@@ -2491,24 +2598,20 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                         last_error = json.dumps({"error": {"message": "上游返回为空，请重试", "type": "upstream_empty_response"}})
                         last_error_status = 502
                     elif resp.status_code == 400 and ("input length too long" in resp_body or '"code":11115' in resp_body):
-                        # 400 + "input length too long"：上下文确实超限，尝试压缩后重试
-                        if not _ctx_compressed[0]:
-                            logger.warning(f"[压缩] Key {label} 400 input length too long，尝试压缩")
-                            result = self._handle_context_too_long(
-                                upstream_request_data, upstream_key, model, upstream_url, _ctx_compressed)
-                            if result != "failed":
-                                request_data = copy.deepcopy(upstream_request_data)
-                                tried_key_ids.discard(key_id)  # 允许同Key重试
-                                continue
-                        # 已压缩过还超，返回友好提示
+                        # Let WorkBuddy handle context compaction itself. Returning the
+                        # recognizable 11115/input-length error avoids creating invalid
+                        # partial tool-message histories in the proxy.
                         error_detail = f"Key {label} 上游返回 400 input length too long"
                         logger.warning(f"[拒绝] {error_detail}")
                         self._add_log(event="end", sub_key=sub_key, upstream_key=upstream_key,
                                       model=model, error="context_too_long")
                         self._send_json(400, {
+                            "code": 11115,
+                            "msg": "input length too long",
                             "error": {
-                                "message": "当前对话上下文过长，超出模型限制。请新开一个对话继续。",
-                                "type": "context_too_long"
+                                "message": "input length too long",
+                                "type": "context_length_exceeded",
+                                "code": 11115,
                             }
                         })
                         return
@@ -2926,11 +3029,15 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             # 检测首 chunk 中的错误（优化项 #4/#11）
             error_type = self._detect_stream_error(first_chunk_str)
             if error_type == "context_too_long":
-                # 上下文超长，不重试，直接返回友好提示
+                # Return a WorkBuddy-recognizable prompt-too-long error so the client
+                # can run its own compact flow.
                 self._send_json(400, {
+                    "code": 11115,
+                    "msg": "input length too long",
                     "error": {
-                        "message": "当前对话上下文过长，超出模型限制。请新开一个对话继续。",
-                        "type": "context_too_long"
+                        "message": "input length too long",
+                        "type": "context_length_exceeded",
+                        "code": 11115,
                     }
                 })
                 self._add_log(event="end", sub_key=sub_key, upstream_key=upstream_key,

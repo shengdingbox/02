@@ -211,6 +211,14 @@ LEGACY_MODEL_FIELDS = {
     "maxContextTokens", "maxAllowedSize", "max_allowed_size",
 }
 
+MODEL_ID_ALIASES = {
+    "kimi-k2.7-code": "kimi-k2.7",
+}
+
+MODEL_NAME_ALIASES = {
+    "kimi-k2.7": "Kimi-K2.7-Code",
+}
+
 
 def _normal_url(url: str) -> str:
     return str(url or "").strip().rstrip("/")
@@ -229,6 +237,12 @@ def _has_legacy_model_fields(entry: dict) -> bool:
 
 def _official_model_entry(entry: dict, include_custom_protocol: bool) -> dict:
     """Convert a legacy generated model entry to WorkBuddy's simple custom-model shape."""
+    model_id = str(entry.get("id", "")).strip()
+    model_id = MODEL_ID_ALIASES.get(model_id, model_id)
+    model_name = entry.get("name") or model_id
+    if str(entry.get("id", "")).strip() in MODEL_ID_ALIASES:
+        model_name = MODEL_NAME_ALIASES.get(model_id, model_name)
+
     supports_images = entry.get("supportsImages")
     if supports_images is None and "supports_images" in entry:
         supports_images = entry.get("supports_images")
@@ -239,8 +253,8 @@ def _official_model_entry(entry: dict, include_custom_protocol: bool) -> dict:
 
     supports_reasoning = bool(entry.get("supportsReasoning", True))
     new_entry = {
-        "id": entry.get("id", ""),
-        "name": entry.get("name") or entry.get("id", ""),
+        "id": model_id,
+        "name": model_name,
         "vendor": entry.get("vendor") or "Custom",
         "url": entry.get("url", ""),
         "apiKey": entry.get("apiKey", ""),
@@ -269,16 +283,32 @@ def _cleanup_legacy_proxy_models(target_path: str, wrapper: str, proxy_base_urls
 
     changed = 0
     cleaned = []
+    cleaned_index = {}
     for entry in models:
+        new_entry = entry
         if (
             isinstance(entry, dict)
             and _entry_matches_proxy(entry, proxy_base_urls)
-            and _has_legacy_model_fields(entry)
+            and (
+                _has_legacy_model_fields(entry)
+                or str(entry.get("id", "")).strip() in MODEL_ID_ALIASES
+            )
         ):
-            cleaned.append(_official_model_entry(entry, include_custom_protocol=(wrapper == "array")))
+            new_entry = _official_model_entry(entry, include_custom_protocol=(wrapper == "array"))
             changed += 1
-        else:
-            cleaned.append(entry)
+
+        if isinstance(new_entry, dict) and _entry_matches_proxy(new_entry, proxy_base_urls):
+            key = (
+                str(new_entry.get("id", "")).strip(),
+                str(new_entry.get("name", "")).strip(),
+                _normal_url(new_entry.get("url", "")),
+            )
+            if key in cleaned_index:
+                cleaned[cleaned_index[key]].update(new_entry)
+                changed += 1
+                continue
+            cleaned_index[key] = len(cleaned)
+        cleaned.append(new_entry)
 
     if changed:
         _write_models_json(target_path, cleaned, wrapper=wrapper)
@@ -466,14 +496,14 @@ class CreateSubKeyDialog(QDialog):
             elif selected is not None and item_text in selected:
                 item.setCheckState(Qt.Checked)
                 item.setData(Qt.UserRole, item_text)
-            elif selected_indices is not None and i in selected_indices:
-                # 注意：selected_indices 是基于 self._upstream_keys 的索引
-                # "全部上游 Key" 占了第0个位置，实际 key 从第1个开始
-                item.setCheckState(Qt.Checked)
-                # 存储实际的 key_id
-                actual_key_idx = i - 1  # 减去 "全部" 选项
-                if 0 <= actual_key_idx < len(self._upstream_keys):
-                    item.setData(Qt.UserRole, self._upstream_keys[actual_key_idx].get("key_id", ""))
+            elif selected_indices is not None:
+                # selected_indices 基于 self._upstream_keys（0-based），
+                # 有 all_option 时 items[0] 是"全部"，key 从 i=1 开始，需 i-1 对齐
+                actual_idx = (i - 1) if all_option else i
+                if actual_idx in selected_indices:
+                    item.setCheckState(Qt.Checked)
+                    if 0 <= actual_idx < len(self._upstream_keys):
+                        item.setData(Qt.UserRole, self._upstream_keys[actual_idx].get("key_id", ""))
             else:
                 item.setCheckState(Qt.Unchecked)
                 if all_option and item_text != all_option:
@@ -710,6 +740,7 @@ class ApiProxyPage(QWidget):
         self._log_timer = QTimer(self)
         self._log_timer.timeout.connect(self._refresh_log)
         self._last_log_timestamp = 0.0  # 跟踪上次最新日志时间戳，避免无变化时重复刷新
+        self._log_cleared_since = 0.0   # 清空日志时间戳，只显示此时间之后的日志
 
         # 上游Key/子Key表格定时刷新（每10秒，用于实时积分变化）
         self._table_timer = QTimer(self)
@@ -1423,7 +1454,24 @@ class ApiProxyPage(QWidget):
             key_id = k.get("key_id", "")
             label = k.get("label", "")
             status = k.get("status", "active")
-            used = k.get("used_count", 0)
+
+            # 统计数据（当天或总计）— used 也必须跟随切换，否则"调用次数"列永远显示总计
+            if self._keys_today_only:
+                today = self._db.get_today_stats("upstream", key_id)
+                used = today.get("count", 0)
+                total_prompt = today.get("prompt_tokens", 0)
+                total_completion = today.get("completion_tokens", 0)
+                total_t = today.get("total_tokens", 0)
+                total_cached = today.get("cached_tokens", 0)
+                total_credits = today.get("credits", 0.0)
+            else:
+                used = k.get("used_count", 0)
+                total_prompt = k.get("total_prompt_tokens", 0)
+                total_completion = k.get("total_completion_tokens", 0)
+                total_t = k.get("total_tokens", 0)
+                total_cached = k.get("total_cached_tokens", 0)
+                total_credits = k.get("total_credits", 0.0)
+
             points = k.get("points", "-")
 
             if status == "active":
@@ -1484,19 +1532,6 @@ class ApiProxyPage(QWidget):
                     pass
 
             # Token 统计（智能单位转换）
-            if self._keys_today_only:
-                today = self._db.get_today_stats("upstream", key_id)
-                total_prompt = today.get("prompt_tokens", 0)
-                total_completion = today.get("completion_tokens", 0)
-                total_t = today.get("total_tokens", 0)
-                total_cached = today.get("cached_tokens", 0)
-                total_credits = today.get("credits", 0.0)
-            else:
-                total_prompt = k.get("total_prompt_tokens", 0)
-                total_completion = k.get("total_completion_tokens", 0)
-                total_t = k.get("total_tokens", 0)
-                total_cached = k.get("total_cached_tokens", 0)
-                total_credits = k.get("total_credits", 0.0)
             if total_t > 0:
                 token_display = f"{_fmt_tokens(total_prompt)}+{_fmt_tokens(total_completion)}"
                 token_tip = f"输入: {total_prompt:,}  输出: {total_completion:,}  总计: {total_t:,}"
@@ -1568,7 +1603,7 @@ class ApiProxyPage(QWidget):
         self._stat_active.setText(f"✅ 活跃: {active}")
         self._stat_exhausted.setText(f"❌ 耗尽: {exhausted}")
         self._stat_abnormal.setText(f"⚠️ 异常: {abnormal}")
-        self._stat_total_used.setText(f"📊 总调用: {total_used}")
+        self._stat_total_used.setText(f"📊 {'今日调用' if self._keys_today_only else '总调用'}: {total_used}")
 
     def _import_from_accounts(self):
         """从已获取账号导入到上游 Key 池"""
@@ -1989,7 +2024,8 @@ class ApiProxyPage(QWidget):
 
             # Key 前缀显示
             key_display = api_key[:12] + "..." if len(api_key) > 12 else api_key
-            _set_item(self._subkeys_table, row, 0, key_display, tooltip=api_key)
+            key_item = _set_item(self._subkeys_table, row, 0, key_display, tooltip=api_key)
+            key_item.setData(Qt.UserRole, sk_id)
 
             _set_item(self._subkeys_table, row, 1, label or "-", tooltip=label or "无标签")
 
@@ -2116,6 +2152,7 @@ class ApiProxyPage(QWidget):
                 "created_at": __import__('datetime').datetime.now().isoformat(),
             }
             self._db.add_sub_api_key(sub_key_data)
+            self._invalidate_proxy_auth_cache()
             self._refresh_sub_keys()
 
             # 提示创建成功
@@ -2145,6 +2182,7 @@ class ApiProxyPage(QWidget):
                 "key_mode": data.get("key_mode", 1),
             }
             self._db.update_sub_api_key(key_id, updates)
+            self._invalidate_proxy_auth_cache()
             self._refresh_sub_keys()
 
     def _on_subkey_double_clicked(self, row: int, col: int):
@@ -2166,6 +2204,29 @@ class ApiProxyPage(QWidget):
         clipboard = QApplication.clipboard()
         clipboard.setText(api_key)
 
+    def _invalidate_proxy_auth_cache(self):
+        """Refresh the running proxy's auth cache after sub-key changes."""
+        try:
+            if self._proxy_server and self._proxy_server.router:
+                self._proxy_server.router.invalidate_upstream_cache()
+        except Exception:
+            pass
+
+    def _subkey_item_for_row(self, row: int):
+        return self._subkeys_table.item(row, 0)
+
+    def _subkey_id_for_row(self, row: int) -> str:
+        item = self._subkey_item_for_row(row)
+        if not item:
+            return ""
+        return str(item.data(Qt.UserRole) or "")
+
+    def _subkey_api_for_row(self, row: int) -> str:
+        item = self._subkey_item_for_row(row)
+        if not item:
+            return ""
+        return item.toolTip() or ""
+
     def _on_subkeys_context_menu(self, pos):
         """子API Key右键菜单"""
         selected_rows = set()
@@ -2185,6 +2246,7 @@ class ApiProxyPage(QWidget):
                 return
             # 从 tooltip 获取完整 api_key
             full_key = key_item.toolTip() or key_item.text()
+            sk_id = self._subkey_id_for_row(row)
 
             action_copy = menu.addAction("📋 复制 API Key")
             action_copy.triggered.connect(lambda: self._copy_sub_key(full_key))
@@ -2195,14 +2257,6 @@ class ApiProxyPage(QWidget):
             status_item = self._subkeys_table.item(row, 2)
             status_text = status_item.text() if status_item else ""
             # 获取 key_id
-            sub_keys = self._db.get_sub_api_keys()
-            sk_id = ""
-            for sk in sub_keys:
-                api_key = sk.get("api_key", "")
-                if api_key == full_key or api_key[:12] == key_item.text().replace("...", ""):
-                    sk_id = sk.get("key_id", "")
-                    break
-
             if "禁用" in status_text and sk_id:
                 action_enable = menu.addAction("✅ 启用")
                 action_enable.triggered.connect(lambda: self._toggle_sub_key(sk_id, True))
@@ -2240,13 +2294,11 @@ class ApiProxyPage(QWidget):
 
     def _batch_copy_subkeys(self, rows: set):
         """批量复制子Key"""
-        sub_keys = self._db.get_sub_api_keys()
         keys_to_copy = []
         for row in rows:
-            if row < len(sub_keys):
-                api_key = sub_keys[row].get("api_key", "")
-                if api_key:
-                    keys_to_copy.append(api_key)
+            api_key = self._subkey_api_for_row(row)
+            if api_key:
+                keys_to_copy.append(api_key)
         if keys_to_copy:
             QApplication.clipboard().setText("\n".join(keys_to_copy))
 
@@ -2259,12 +2311,14 @@ class ApiProxyPage(QWidget):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            sub_keys = self._db.get_sub_api_keys()
+            deleted = 0
             for row in rows:
-                if row < len(sub_keys):
-                    sk_id = sub_keys[row].get("key_id", "")
+                sk_id = self._subkey_id_for_row(row)
                 if sk_id:
                     self._db.delete_sub_api_key(sk_id)
+                    deleted += 1
+            if deleted:
+                self._invalidate_proxy_auth_cache()
             self._refresh_sub_keys()
 
     # ─── 一键配置 WorkBuddy / CodeBuddy ───
@@ -2274,7 +2328,7 @@ class ApiProxyPage(QWidget):
         "deepseek-v4-pro", "deepseek-v4-flash",
         "deepseek-v3-2-volc", "deepseek-v3-1", "deepseek-v3-0324", "deepseek-r1",
         "glm-5.2", "glm-5.1", "glm-5.0", "glm-5.0-turbo", "glm-5v-turbo", "glm-4.7", "glm-4.6",
-        "kimi-k2.6", "kimi-k2.5", "kimi-k2.7-code",
+        "kimi-k2.6", "kimi-k2.5", "kimi-k2.7",
         "minimax-m3", "minimax-m2.7", "minimax-m2.5",
         "auto",
     ]
@@ -2283,7 +2337,7 @@ class ApiProxyPage(QWidget):
     # 注意：图片文件名使用小写 id，与此处显示名解耦
     MODEL_DISPLAY_NAMES = {
         "hy3": "Hy3",
-        "kimi-k2.7-code": "Kimi-K2.7-Code",
+        "kimi-k2.7": "Kimi-K2.7-Code",
     }
 
     # 模型能力定义 (tool_call, images, reasoning)
@@ -2308,7 +2362,7 @@ class ApiProxyPage(QWidget):
         "glm-4.6":                  (True,  True,  True),
         "kimi-k2.6":                (True,  True,  True),
         "kimi-k2.5":                (True,  True,  True),
-        "kimi-k2.7-code":           (True,  True,  True),
+        "kimi-k2.7":                (True,  True,  True),
         "minimax-m3":               (True,  True,  True),
         "minimax-m2.7":             (True,  True,  True),
         "minimax-m2.5":             (True,  True,  True),
@@ -2549,6 +2603,7 @@ class ApiProxyPage(QWidget):
     def _toggle_sub_key(self, key_id: str, enable: bool):
         """启用/禁用子 Key"""
         self._db.update_sub_api_key(key_id, {"is_active": enable})
+        self._invalidate_proxy_auth_cache()
         self._refresh_sub_keys()
 
     def _delete_sub_key(self, key_id: str):
@@ -2559,13 +2614,15 @@ class ApiProxyPage(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._db.delete_sub_api_key(key_id)
+            self._invalidate_proxy_auth_cache()
             self._refresh_sub_keys()
 
     # === 使用日志 ===
 
     def _refresh_log(self):
         """刷新请求日志（智能跳过无变化时）"""
-        logs = self._db.get_request_logs(limit=200)
+        # 只获取清空之后的日志（_log_cleared_since 为 0 时获取全部）
+        logs = self._db.get_request_logs(since=self._log_cleared_since, limit=200)
 
         # 无日志
         if not logs:
@@ -2637,9 +2694,11 @@ class ApiProxyPage(QWidget):
         self._log_edit.setPlainText("\n".join(lines))
 
     def _clear_log(self):
-        """清空日志显示"""
-        self._log_edit.clear()
+        """清空日志显示 — 记录清空时间戳，之后只显示新产生的日志"""
+        import time
+        self._log_cleared_since = time.time()
         self._last_log_timestamp = 0.0
+        self._log_edit.clear()
 
     # === 页面生命周期 ===
 
