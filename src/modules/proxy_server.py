@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import secrets
 import select
 import socket
@@ -28,6 +29,8 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import requests
+
+from ..utils.store import load_setting
 
 logger = logging.getLogger(__name__)
 
@@ -688,6 +691,110 @@ def _build_workbuddy_relay_headers(api_key: str) -> dict:
     }
 
 
+_SYSTEM_PROMPT_REPLACEMENT_CACHE = {
+    "raw": "",
+    "pattern": None,
+    "values": {},
+}
+
+
+def _load_system_prompt_sensitive_replacements() -> list[dict]:
+    try:
+        enabled = load_setting("system_prompt_sensitive_enabled", "False")
+        raw_value = load_setting("system_prompt_sensitive_replacements", "[]")
+    except Exception as exc:
+        logger.warning(f"[系统提示词敏感信息] 读取配置失败，已跳过替换: {exc}")
+        return []
+
+    if enabled != "True":
+        return []
+
+    try:
+        pairs = json.loads(raw_value or "[]")
+    except json.JSONDecodeError:
+        logger.warning("[系统提示词敏感信息] 配置 JSON 解析失败，已跳过替换")
+        return []
+
+    if not isinstance(pairs, list):
+        return []
+
+    replacements = []
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        key = str(pair.get("key", "")).strip()
+        if not key:
+            continue
+        replacements.append({"key": key, "value": str(pair.get("value", ""))})
+    return replacements
+
+
+def _compile_system_prompt_replacement_pattern(replacements: list[dict]):
+    raw_key = json.dumps(replacements, ensure_ascii=False, sort_keys=True)
+    if _SYSTEM_PROMPT_REPLACEMENT_CACHE["raw"] == raw_key:
+        return (
+            _SYSTEM_PROMPT_REPLACEMENT_CACHE["pattern"],
+            _SYSTEM_PROMPT_REPLACEMENT_CACHE["values"],
+        )
+
+    values = {item["key"]: item["value"] for item in replacements}
+    pattern = None
+    if values:
+        escaped_keys = [re.escape(key) for key in sorted(values, key=len, reverse=True)]
+        pattern = re.compile("|".join(escaped_keys))
+
+    _SYSTEM_PROMPT_REPLACEMENT_CACHE["raw"] = raw_key
+    _SYSTEM_PROMPT_REPLACEMENT_CACHE["pattern"] = pattern
+    _SYSTEM_PROMPT_REPLACEMENT_CACHE["values"] = values
+    return pattern, values
+
+
+def _replace_system_prompt_sensitive_words(messages: list) -> int:
+    replacements = _load_system_prompt_sensitive_replacements()
+    if not replacements or not isinstance(messages, list):
+        return 0
+
+    pattern, values = _compile_system_prompt_replacement_pattern(replacements)
+    if not pattern:
+        return 0
+
+    replaced_count = 0
+
+    def _replace_text(text: str) -> tuple[str, int]:
+        count = 0
+
+        def _replace_match(match):
+            nonlocal count
+            count += 1
+            return values.get(match.group(0), "")
+
+        return pattern.sub(_replace_match, text), count
+
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "system":
+            continue
+
+        content = msg.get("content")
+        if isinstance(content, str):
+            new_content, count = _replace_text(content)
+            if count:
+                msg["content"] = new_content
+                replaced_count += count
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "text":
+                    continue
+                text = part.get("text")
+                if not isinstance(text, str):
+                    continue
+                new_text, count = _replace_text(text)
+                if count:
+                    part["text"] = new_text
+                    replaced_count += count
+
+    return replaced_count
+
+
 def _build_workbuddy_relay_body(client_body: dict) -> tuple[dict, dict]:
     """
     Build the upstream body for WorkBuddy key-pool relay.
@@ -700,6 +807,7 @@ def _build_workbuddy_relay_body(client_body: dict) -> tuple[dict, dict]:
     body = copy.deepcopy(client_body)
     body["model"] = body.get("model") or "auto"
     body["messages"] = copy.deepcopy(client_body.get("messages", []))
+    sensitive_replaced = _replace_system_prompt_sensitive_words(body["messages"])
     body["stream"] = True
 
     dropped_fields = []
@@ -724,10 +832,13 @@ def _build_workbuddy_relay_body(client_body: dict) -> tuple[dict, dict]:
         "history_images_replaced": 0,
         "normalized_images": 0,
         "unsupported_inline_images_removed": 0,
+        "system_prompt_sensitive_replaced": sensitive_replaced,
         "image_stats_before": image_stats,
         "image_stats_after": image_stats,
         "has_stream_options": "stream_options" in body,
     }
+    if sensitive_replaced:
+        logger.info(f"[系统提示词敏感信息] 已替换 {sensitive_replaced} 处敏感信息")
     return body, meta
 
 
@@ -2465,6 +2576,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 req_headers = _build_workbuddy_relay_headers(upstream_api_key)
                 client_wants_stream = request_data.get("stream", False)
                 upstream_request_data, build_meta = _build_workbuddy_relay_body(request_data)
+                sensitive_replaced = build_meta.get("system_prompt_sensitive_replaced", 0)
+                if sensitive_replaced:
+                    self._add_log(
+                        event="sensitive_replace",
+                        sub_key=sub_key,
+                        upstream_key=upstream_key,
+                        model=model,
+                        error=f"系统提示词敏感信息替换 {sensitive_replaced} 处",
+                        request_path="/v1/chat/completions",
+                    )
 
                 if (
                     build_meta["removed_null_fields"]

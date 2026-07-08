@@ -2671,6 +2671,9 @@ class ApiProxyPage(QWidget):
                 # 上游限流
                 icon = "🐌"
                 line = f"{icon} {time_str} 上游限流  key={main_label}  model={model}  ❌{error}"
+            elif event == "sensitive_replace":
+                icon = "🛡️"
+                line = f"{icon} {time_str} 敏感信息检测  sub={sub_label}  model={model}  {error}"
             elif event == "start":
                 icon = "🟢"
                 line = f"{icon} {time_str} START  sub={sub_label}  key={main_label}  model={model}"

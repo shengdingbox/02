@@ -189,6 +189,16 @@ def get_stylesheet(theme: str = "system") -> str:
         #content_area {{
             background-color: {colors['bg_primary']};
         }}
+        QScrollArea#settings_scroll_area {{
+            background-color: {colors['bg_primary']};
+            border: none;
+        }}
+        QWidget#settings_scroll_viewport {{
+            background-color: {colors['bg_primary']};
+        }}
+        QWidget#settings_scroll_content {{
+            background-color: {colors['bg_primary']};
+        }}
         #page_title {{
             color: {colors['text_primary']};
             font-size: 24px;

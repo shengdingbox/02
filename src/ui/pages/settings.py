@@ -1,11 +1,14 @@
 """设置页面"""
 
+import json
 import os
 import sys
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
-    QComboBox, QSpinBox, QLineEdit, QCheckBox, QGroupBox, QFormLayout
+    QComboBox, QSpinBox, QLineEdit, QCheckBox, QGroupBox, QFormLayout,
+    QRadioButton, QButtonGroup, QTableWidget, QTableWidgetItem,
+    QAbstractItemView, QHeaderView, QScrollArea
 )
 from PySide6.QtCore import Qt
 
@@ -39,7 +42,16 @@ class SettingsPage(QWidget):
         subtitle.setObjectName("page_subtitle")
         layout.addWidget(subtitle)
 
+        scroll_area = QScrollArea()
+        scroll_area.setObjectName("settings_scroll_area")
+        scroll_area.viewport().setObjectName("settings_scroll_viewport")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         content = QWidget()
+        content.setObjectName("settings_scroll_content")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(32, 0, 32, 32)
         content_layout.setSpacing(20)
@@ -96,6 +108,57 @@ class SettingsPage(QWidget):
 
         content_layout.addWidget(refresh_group)
 
+        # === 敏感信息检测 ===
+        sensitive_group = QGroupBox("🛡️ 敏感信息检测")
+        sensitive_layout = QVBoxLayout(sensitive_group)
+        sensitive_layout.setSpacing(12)
+        sensitive_layout.setContentsMargins(20, 24, 20, 20)
+
+        switch_row = QHBoxLayout()
+        switch_label = QLabel("检测系统提示词:")
+        self._sensitive_off_radio = QRadioButton("关")
+        self._sensitive_on_radio = QRadioButton("开")
+        self._sensitive_radio_group = QButtonGroup(self)
+        self._sensitive_radio_group.addButton(self._sensitive_off_radio)
+        self._sensitive_radio_group.addButton(self._sensitive_on_radio)
+        self._sensitive_off_radio.setChecked(True)
+        self._sensitive_radio_group.buttonClicked.connect(lambda _button: self._on_sensitive_switch_changed())
+        switch_row.addWidget(switch_label)
+        switch_row.addWidget(self._sensitive_off_radio)
+        switch_row.addWidget(self._sensitive_on_radio)
+        switch_row.addStretch()
+        sensitive_layout.addLayout(switch_row)
+
+        self._sensitive_table = QTableWidget(0, 2)
+        self._sensitive_table.setHorizontalHeaderLabels(["敏感关键词 K（必填）", "替换词 V（可空）"])
+        self._sensitive_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._sensitive_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._sensitive_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._sensitive_table.setEditTriggers(
+            QAbstractItemView.DoubleClicked |
+            QAbstractItemView.SelectedClicked |
+            QAbstractItemView.EditKeyPressed
+        )
+        self._sensitive_table.setMinimumHeight(130)
+        self._sensitive_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._sensitive_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sensitive_layout.addWidget(self._sensitive_table)
+
+        sensitive_btn_row = QHBoxLayout()
+        self._add_sensitive_btn = QPushButton("添加")
+        self._add_sensitive_btn.setCursor(Qt.PointingHandCursor)
+        self._add_sensitive_btn.clicked.connect(self._add_sensitive_row)
+        self._remove_sensitive_btn = QPushButton("删除选中")
+        self._remove_sensitive_btn.setCursor(Qt.PointingHandCursor)
+        self._remove_sensitive_btn.clicked.connect(self._remove_sensitive_rows)
+        sensitive_btn_row.addWidget(self._add_sensitive_btn)
+        sensitive_btn_row.addWidget(self._remove_sensitive_btn)
+        sensitive_btn_row.addStretch()
+        sensitive_layout.addLayout(sensitive_btn_row)
+
+        content_layout.addWidget(sensitive_group)
+        self._on_sensitive_switch_changed()
+
         # 保存按钮
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -108,7 +171,8 @@ class SettingsPage(QWidget):
 
         content_layout.addLayout(btn_row)
         content_layout.addStretch()
-        layout.addWidget(content)
+        scroll_area.setWidget(content)
+        layout.addWidget(scroll_area, 1)
 
     def _on_theme_changed(self, index: int):
         """主题切换"""
@@ -131,6 +195,12 @@ class SettingsPage(QWidget):
         save_setting("close_behavior", "minimize" if self._close_combo.currentIndex() == 0 else "exit")
         save_setting("startup", str(self._startup_check.isChecked()))
         save_setting("refresh_interval", str(self._refresh_spin.value()))
+        save_setting("system_prompt_sensitive_enabled", "True" if self._sensitive_on_radio.isChecked() else "False")
+
+        sensitive_pairs = self._collect_sensitive_pairs()
+        if sensitive_pairs is None:
+            return
+        save_setting("system_prompt_sensitive_replacements", json.dumps(sensitive_pairs, ensure_ascii=False))
 
         # 开机自启动
         startup_enabled = self._startup_check.isChecked()
@@ -138,6 +208,52 @@ class SettingsPage(QWidget):
 
         from PySide6.QtWidgets import QMessageBox
         QMessageBox.information(self, t("common.success"), "设置已保存")
+
+    def _on_sensitive_switch_changed(self):
+        """切换敏感信息检测配置启用状态"""
+        enabled = self._sensitive_on_radio.isChecked()
+        self._sensitive_table.setEnabled(enabled)
+        self._add_sensitive_btn.setEnabled(enabled)
+        self._remove_sensitive_btn.setEnabled(enabled)
+
+    def _add_sensitive_row(self, key: str = "", value: str = ""):
+        """添加一行敏感信息配置"""
+        row = self._sensitive_table.rowCount()
+        self._sensitive_table.insertRow(row)
+        self._sensitive_table.setItem(row, 0, QTableWidgetItem(key))
+        self._sensitive_table.setItem(row, 1, QTableWidgetItem(value))
+
+    def _remove_sensitive_rows(self):
+        """删除选中的敏感信息配置行"""
+        selected_rows = sorted(
+            {index.row() for index in self._sensitive_table.selectedIndexes()},
+            reverse=True,
+        )
+        for row in selected_rows:
+            self._sensitive_table.removeRow(row)
+
+    def _collect_sensitive_pairs(self) -> list[dict] | None:
+        """收集敏感信息检测配置"""
+        from PySide6.QtWidgets import QMessageBox
+
+        pairs = []
+        seen_keys = set()
+        for row in range(self._sensitive_table.rowCount()):
+            key_item = self._sensitive_table.item(row, 0)
+            value_item = self._sensitive_table.item(row, 1)
+            key = key_item.text().strip() if key_item else ""
+            value = value_item.text() if value_item else ""
+            if not key and not value:
+                continue
+            if not key:
+                QMessageBox.warning(self, t("common.warning"), f"第 {row + 1} 行敏感关键词 K 不能为空")
+                return None
+            if key in seen_keys:
+                QMessageBox.warning(self, t("common.warning"), f"敏感关键词重复: {key}")
+                return None
+            seen_keys.add(key)
+            pairs.append({"key": key, "value": value})
+        return pairs
 
     @staticmethod
     def _set_auto_startup(enable: bool):
@@ -226,6 +342,12 @@ class SettingsPage(QWidget):
             # 刷新间隔
             refresh = int(load_setting("refresh_interval", "30"))
             self._refresh_spin.setValue(refresh)
+
+            # 敏感信息检测
+            self._sensitive_on_radio.setChecked(load_setting("system_prompt_sensitive_enabled", "False") == "True")
+            self._sensitive_off_radio.setChecked(not self._sensitive_on_radio.isChecked())
+            self._load_sensitive_rows(load_setting("system_prompt_sensitive_replacements", "[]"))
+            self._on_sensitive_switch_changed()
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"加载设置失败: {e}")
@@ -233,3 +355,20 @@ class SettingsPage(QWidget):
             self._theme_combo.blockSignals(False)
             self._lang_combo.blockSignals(False)
             self._close_combo.blockSignals(False)
+
+    def _load_sensitive_rows(self, raw_value: str):
+        """加载敏感信息检测配置行"""
+        self._sensitive_table.setRowCount(0)
+        try:
+            pairs = json.loads(raw_value or "[]")
+        except json.JSONDecodeError:
+            pairs = []
+        if not isinstance(pairs, list):
+            return
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            key = str(pair.get("key", "")).strip()
+            value = str(pair.get("value", ""))
+            if key:
+                self._add_sensitive_row(key, value)
