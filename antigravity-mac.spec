@@ -18,6 +18,11 @@ block_cipher = None
 
 # 项目根目录
 ROOT = os.path.abspath(SPECPATH)
+VERSION_PATH = os.path.join(ROOT, 'src', 'VERSION')
+with open(VERSION_PATH, 'r', encoding='utf-8') as version_file:
+    APP_VERSION = version_file.read().strip()
+if not APP_VERSION or any(not part.isdigit() for part in APP_VERSION.split('.')):
+    raise ValueError(f'Invalid application version in {VERSION_PATH}: {APP_VERSION!r}')
 
 # ─── PySide6 运行时路径 ───
 pyside6_dir = os.path.dirname(QtCore.__file__)
@@ -192,8 +197,8 @@ app = BUNDLE(
         'CFBundleName': 'Antigravity Tools',
         'CFBundleDisplayName': 'Antigravity Tools',
         'CFBundleIdentifier': 'com.antigravity.tools',
-        'CFBundleVersion': '1.0.0',
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleVersion': APP_VERSION,
+        'CFBundleShortVersionString': APP_VERSION,
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.15',
         'NSRequiresAquaSystemAppearance': False,
