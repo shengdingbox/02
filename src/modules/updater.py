@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -80,12 +81,96 @@ def _compare_versions(remote: str, local: str) -> bool:
         return False
 
 
+def _is_src_asset(asset_name: str) -> bool:
+    """判断 GitHub Release asset 是否为增量 src 包。"""
+    asset_lower = asset_name.lower()
+    return "-src" in asset_lower or ".src." in asset_lower or "src-" in asset_lower
+
+
+def _is_windows_asset(asset_name: str) -> bool:
+    """判断 asset 名称是否显式指向 Windows 平台。"""
+    asset_lower = asset_name.lower()
+    return "windows" in asset_lower or "win" in asset_lower
+
+
+def _is_macos_asset(asset_name: str) -> bool:
+    """判断 asset 名称是否显式指向 macOS 平台。"""
+    asset_lower = asset_name.lower()
+    return "macos" in asset_lower or "mac" in asset_lower or "darwin" in asset_lower
+
+
+def _select_github_assets(assets: list[dict], platform_keyword: str) -> tuple[str, str]:
+    """按当前平台选择完整包和增量 src 包下载地址。
+
+    Src 包选择顺序：
+    1. 当前平台 + 架构精确匹配（例如 macOS-ARM / macOS-Intel / Windows-x64）
+    2. 当前平台通用 src（例如 macOS-src / Windows-src）
+    3. 历史通用 src（不带平台名）
+
+    这样避免 macOS ARM 因资产顺序误选 Intel src，或 macOS 误选 Windows src。
+    """
+    keyword_lower = platform_keyword.lower()
+    exact_src_url = ""
+    platform_src_url = ""
+    generic_src_url = ""
+    download_url = ""
+
+    for asset in assets:
+        asset_name = asset.get("name", "")
+        asset_url = asset.get("browser_download_url", "")
+        if not asset_url:
+            continue
+
+        asset_lower = asset_name.lower()
+        if _is_src_asset(asset_name):
+            if keyword_lower in asset_lower and not exact_src_url:
+                exact_src_url = asset_url
+            elif not platform_src_url:
+                if sys.platform == "darwin" and _is_macos_asset(asset_name) and not _is_windows_asset(asset_name):
+                    platform_src_url = asset_url
+                elif sys.platform != "darwin" and _is_windows_asset(asset_name):
+                    platform_src_url = asset_url
+                elif not _is_macos_asset(asset_name) and not _is_windows_asset(asset_name) and not generic_src_url:
+                    generic_src_url = asset_url
+            elif not _is_macos_asset(asset_name) and not _is_windows_asset(asset_name) and not generic_src_url:
+                generic_src_url = asset_url
+        elif keyword_lower in asset_lower and not download_url:
+            download_url = asset_url
+
+    return download_url, exact_src_url or platform_src_url or generic_src_url
+
+
+def _sh_quote(value) -> str:
+    """Return a POSIX shell-safe quoted string for paths containing spaces/CJK."""
+    return shlex.quote(str(value))
+
+
+def _find_running_macos_app_path(current_exe: Path) -> Path | None:
+    """Locate the containing .app bundle for the running macOS executable."""
+    candidate = current_exe
+    while candidate.parent != candidate and not candidate.name.endswith(".app"):
+        candidate = candidate.parent
+    if candidate.name.endswith(".app"):
+        return candidate
+
+    for parent in current_exe.parents:
+        if parent.name.endswith(".app"):
+            return parent
+    return None
+
+
+def _write_macos_update_script(script_path: Path, script_content: str) -> None:
+    """Write a macOS updater shell script and mark it executable."""
+    script_path.write_text(script_content, encoding="utf-8")
+    script_path.chmod(0o755)
+
+
 def _fetch_github_release(timeout: int = 15) -> dict | None:
     """从 GitHub Release API 获取最新版本信息
 
     返回格式与旧服务器 version.json 兼容：
     {
-        "version": "1.7.9",
+        "version": "1.8.0",
         "changelog": "...",
         "download_url": "https://github.com/.../Antigravity-Tools-Windows-x64.zip",
         "sha256": "",
@@ -114,18 +199,7 @@ def _fetch_github_release(timeout: int = 15) -> dict | None:
 
         # 匹配当前平台的 asset（优先增量包，其次完整包）
         keyword = _get_platform_asset_keyword()
-        download_url = ""
-        src_download_url = ""
-        for asset in data.get("assets", []):
-            asset_name = asset.get("name", "")
-            asset_url = asset.get("browser_download_url", "")
-            asset_lower = asset_name.lower()
-            if "-src" in asset_lower or ".src." in asset_lower:
-                # 增量包（只含 src/）— [v1.6.1-fix] 增量包不限平台，所有平台通用
-                src_download_url = asset_url
-            elif keyword.lower() in asset_lower and not download_url:
-                # 完整包（需要匹配平台）
-                download_url = asset_url
+        download_url, src_download_url = _select_github_assets(data.get("assets", []), keyword)
 
         if not download_url:
             download_url = data.get("html_url", "")
@@ -286,8 +360,8 @@ def _get_powershell_exe() -> str | None:
 def _apply_src_only_update(zip_path: Path) -> bool:
     """增量更新：只替换 src/ 目录
 
-    Windows: 批处理等待进程退出后 robocopy _internal/src/
-    macOS: ditto 直接覆盖 .app/Contents/Resources/src/
+    Windows: PowerShell 等待进程退出后替换 _internal/src/
+    macOS: shell 脚本等待进程退出后替换 .app/Contents/Resources/src/
     """
     import subprocess
 
@@ -332,36 +406,79 @@ def _apply_src_only_update(zip_path: Path) -> bool:
         logger.info(f"增量包已复制到稳定目录: {stable_copy}")
 
         if sys.platform == "darwin":
-            # macOS: 找到 .app 的 src 目录
+            # macOS: 不能在当前进程运行时删除 Resources/src，改为退出后脚本替换并重启。
             current_exe = Path(sys.executable)
-            app_path = current_exe
-            while app_path.parent.name != "" and not app_path.name.endswith(".app"):
-                app_path = app_path.parent
-            if not app_path.name.endswith(".app"):
-                for p in current_exe.parents:
-                    if p.name.endswith(".app"):
-                        app_path = p
-                        break
+            app_path = _find_running_macos_app_path(current_exe)
+            if app_path is None:
+                logger.error(f"无法定位 .app 目录，当前 exe: {current_exe}")
+                return False
 
             src_dir = app_path / "Contents" / "Resources" / "src"
             if not src_dir.exists():
                 logger.error(f"macOS src 目录不存在: {src_dir}")
                 return False
 
-            # ditto 覆盖
-            subprocess.run(["rm", "-rf", str(src_dir)], capture_output=True, timeout=30)
-            result = subprocess.run(
-                ["ditto", str(stable_copy), str(src_dir)],
-                capture_output=True, timeout=60
-            )
-            if result.returncode != 0:
-                logger.error(f"ditto 覆盖 src 失败: {result.stderr.decode(errors='replace')[:200]}")
-                return False
+            script_path = Path(tempfile.gettempdir()) / "ag_src_updater.sh"
+            log_path = Path(tempfile.gettempdir()) / "ag_update_error.log"
+            backup_dir = Path(tempfile.gettempdir()) / f"ag_src_backup_{os.getpid()}"
+            script_content = f"""#!/bin/sh
+set -u
+LOG={_sh_quote(log_path)}
+SRC_DIR={_sh_quote(src_dir)}
+STABLE_COPY={_sh_quote(stable_copy)}
+TMP_DIR={_sh_quote(tmp_dir)}
+APP_PATH={_sh_quote(app_path)}
+BACKUP_DIR={_sh_quote(backup_dir)}
+SCRIPT_PATH={_sh_quote(script_path)}
+TARGET_VERSION={_sh_quote(target_version)}
+OLD_PID={os.getpid()}
 
-            # 清理临时目录
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            shutil.rmtree(stable_copy, ignore_errors=True)
-            logger.info("macOS 增量更新成功")
+log() {{
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"
+}}
+
+fail() {{
+    log "ERROR: $1"
+    exit 1
+}}
+
+log "macOS src update script started"
+sleep 2
+while kill -0 "$OLD_PID" 2>/dev/null; do
+    sleep 0.5
+done
+log "old process exited"
+
+[ -d "$STABLE_COPY" ] || fail "stable src copy missing: $STABLE_COPY"
+PARENT_DIR=$(dirname "$SRC_DIR")
+mkdir -p "$PARENT_DIR" || fail "create src parent failed: $PARENT_DIR"
+
+if [ -d "$SRC_DIR" ]; then
+    rm -rf "$BACKUP_DIR"
+    ditto "$SRC_DIR" "$BACKUP_DIR" || log "backup src failed: $SRC_DIR"
+    rm -rf "$SRC_DIR" || fail "delete old src failed: $SRC_DIR"
+fi
+
+ditto "$STABLE_COPY" "$SRC_DIR" || fail "ditto src failed"
+chmod -R u+rwX "$SRC_DIR" || fail "chmod src failed"
+[ -f "$SRC_DIR/VERSION" ] || fail "VERSION missing after copy: $SRC_DIR/VERSION"
+ACTUAL_VERSION=$(tr -d '\r\n' < "$SRC_DIR/VERSION")
+[ "$ACTUAL_VERSION" = "$TARGET_VERSION" ] || fail "VERSION verify failed: expected $TARGET_VERSION, got $ACTUAL_VERSION"
+log "version verified: $ACTUAL_VERSION"
+
+rm -rf "$TMP_DIR" "$STABLE_COPY"
+open -n "$APP_PATH" || fail "restart failed: $APP_PATH"
+log "restart launched: $APP_PATH"
+rm -f "$SCRIPT_PATH"
+"""
+            _write_macos_update_script(script_path, script_content)
+            subprocess.Popen(
+                ["/bin/sh", str(script_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            logger.info("macOS 增量更新脚本已启动，即将退出应用以完成更新")
             return True
 
         else:
@@ -478,7 +595,7 @@ def _apply_frozen_update(zip_path: Path) -> bool:
     """打包模式下的自动更新
 
     Windows: 下载 zip → 批处理替换 → 重启
-    macOS: 下载 zip → ditto 覆盖 .app → 重启
+    macOS: 下载 zip → shell 脚本等待退出后替换 .app → 重启
     """
     import subprocess
 
@@ -493,56 +610,103 @@ def _apply_frozen_update(zip_path: Path) -> bool:
 
 
 def _apply_frozen_update_mac(zip_path: Path) -> bool:
-    """macOS 打包模式：ditto 覆盖 .app"""
+    """macOS 打包模式：退出后用 shell 脚本替换整个 .app 并重启。"""
     import subprocess
 
     try:
         current_exe = Path(sys.executable)
-        app_path = current_exe
-        while app_path.parent.name != "" and not app_path.name.endswith(".app"):
-            app_path = app_path.parent
-        if not app_path.name.endswith(".app"):
-            for p in current_exe.parents:
-                if p.name.endswith(".app"):
-                    app_path = p
-                    break
-
-        if not app_path.name.endswith(".app"):
+        app_path = _find_running_macos_app_path(current_exe)
+        if app_path is None:
             logger.error(f"无法定位 .app 目录，当前 exe: {current_exe}")
             return False
 
         logger.info(f"当前 .app 路径: {app_path}")
 
-        with tempfile.TemporaryDirectory(prefix="ag_update_") as tmp_dir:
-            tmp = Path(tmp_dir)
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(tmp)
+        tmp_dir = Path(tempfile.gettempdir()) / "ag_full_update"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
 
-            new_app = None
-            for app_dir in tmp.rglob("*.app"):
-                new_app = app_dir
-                break
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmp_dir)
 
-            if not new_app:
-                logger.error("更新包中未找到 .app 文件")
-                return False
+        new_app = None
+        for app_dir in tmp_dir.rglob("*.app"):
+            new_app = app_dir
+            break
 
-            logger.info(f"新版本 .app: {new_app}")
+        if not new_app:
+            logger.error("更新包中未找到 .app 文件")
+            return False
 
-            subprocess.run(["rm", "-rf", str(app_path)], capture_output=True, timeout=30)
-            result = subprocess.run(
-                ["ditto", str(new_app), str(app_path)],
-                capture_output=True, timeout=120
-            )
-            if result.returncode != 0:
-                logger.error(f"ditto 覆盖失败: {result.stderr.decode(errors='replace')[:200]}")
-                return False
+        logger.info(f"新版本 .app: {new_app}")
 
-            exe_in_app = app_path / "Contents" / "MacOS" / "Antigravity Tools"
-            if exe_in_app.exists():
-                subprocess.run(["chmod", "+x", str(exe_in_app)], capture_output=True)
+        stable_app = Path(tempfile.gettempdir()) / "ag_full_stable.app"
+        if stable_app.exists():
+            shutil.rmtree(stable_app, ignore_errors=True)
+        shutil.copytree(new_app, stable_app)
+        logger.info(f"完整包已复制到稳定目录: {stable_app}")
 
-        logger.info("macOS 更新覆盖成功")
+        script_path = Path(tempfile.gettempdir()) / "ag_full_updater.sh"
+        log_path = Path(tempfile.gettempdir()) / "ag_update_error.log"
+        backup_app = Path(tempfile.gettempdir()) / f"ag_app_backup_{os.getpid()}.app"
+        script_content = f"""#!/bin/sh
+set -u
+LOG={_sh_quote(log_path)}
+APP_PATH={_sh_quote(app_path)}
+STABLE_APP={_sh_quote(stable_app)}
+TMP_DIR={_sh_quote(tmp_dir)}
+BACKUP_APP={_sh_quote(backup_app)}
+SCRIPT_PATH={_sh_quote(script_path)}
+OLD_PID={os.getpid()}
+
+log() {{
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"
+}}
+
+fail() {{
+    log "ERROR: $1"
+    exit 1
+}}
+
+log "macOS full update script started"
+sleep 2
+while kill -0 "$OLD_PID" 2>/dev/null; do
+    sleep 0.5
+done
+log "old process exited"
+
+[ -d "$STABLE_APP" ] || fail "stable app copy missing: $STABLE_APP"
+APP_PARENT=$(dirname "$APP_PATH")
+mkdir -p "$APP_PARENT" || fail "create app parent failed: $APP_PARENT"
+
+if [ -d "$APP_PATH" ]; then
+    rm -rf "$BACKUP_APP"
+    ditto "$APP_PATH" "$BACKUP_APP" || log "backup app failed: $APP_PATH"
+    rm -rf "$APP_PATH" || fail "delete old app failed: $APP_PATH"
+fi
+
+ditto "$STABLE_APP" "$APP_PATH" || fail "ditto app failed"
+chmod -R u+rwX "$APP_PATH" || fail "chmod app failed"
+if [ -d "$APP_PATH/Contents/MacOS" ]; then
+    chmod -R u+x "$APP_PATH/Contents/MacOS" || fail "chmod executable failed"
+fi
+[ -d "$APP_PATH" ] || fail "app missing after copy: $APP_PATH"
+
+rm -rf "$TMP_DIR" "$STABLE_APP"
+open -n "$APP_PATH" || fail "restart failed: $APP_PATH"
+log "restart launched: $APP_PATH"
+rm -f "$SCRIPT_PATH"
+"""
+        _write_macos_update_script(script_path, script_content)
+        subprocess.Popen(
+            ["/bin/sh", str(script_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        logger.info("macOS 完整包更新脚本已启动，即将退出应用以完成更新")
         return True
 
     except Exception as e:

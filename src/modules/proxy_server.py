@@ -22,7 +22,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from typing import Optional
@@ -1514,6 +1514,76 @@ class ProxyDatabase:
         today = datetime.now().strftime("%Y-%m-%d")
         with self._lock:
             return dict(self._data.get("daily_stats", {}).get(category, {}).get(key_id, {}).get(today, {}))
+
+    def get_usage_summary(self, days: int = None) -> dict:
+        """获取使用情况汇总统计
+
+        Args:
+            days: None=总计（从 upstream_keys 的累计字段汇总）
+                  1=今日
+                  N=近N天
+
+        Returns:
+            {
+                "prompt_tokens": int,       # 上行Token
+                "completion_tokens": int,   # 下行Token
+                "total_tokens": int,        # 总Token
+                "cached_tokens": int,       # 缓存命中Token
+                "credits": float,           # 消耗积分
+                "count": int,               # 请求数量
+                "cache_hit_rate": float,    # 缓存命中率(0~1)
+            }
+        """
+        result = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "credits": 0.0,
+            "count": 0,
+            "cache_hit_rate": 0.0,
+        }
+
+        with self._lock:
+            if days is None:
+                # 总计：从 upstream_keys 累计字段汇总
+                for k in self._data.get("upstream_keys", []):
+                    result["prompt_tokens"] += k.get("total_prompt_tokens", 0)
+                    result["completion_tokens"] += k.get("total_completion_tokens", 0)
+                    result["total_tokens"] += k.get("total_tokens", 0)
+                    result["cached_tokens"] += k.get("total_cached_tokens", 0)
+                    result["credits"] += k.get("total_credits", 0.0)
+                    result["count"] += k.get("used_count", 0)
+            else:
+                # 今日或近N天：从 daily_stats 汇总
+                today = datetime.now()
+                if days == 1:
+                    date_list = [today.strftime("%Y-%m-%d")]
+                else:
+                    date_list = [
+                        (today - timedelta(days=i)).strftime("%Y-%m-%d")
+                        for i in range(days)
+                    ]
+
+                upstream_stats = self._data.get("daily_stats", {}).get("upstream", {})
+                for key_id, dates in upstream_stats.items():
+                    for date_str in date_list:
+                        day_data = dates.get(date_str)
+                        if day_data:
+                            result["prompt_tokens"] += day_data.get("prompt_tokens", 0)
+                            result["completion_tokens"] += day_data.get("completion_tokens", 0)
+                            result["total_tokens"] += day_data.get("total_tokens", 0)
+                            result["cached_tokens"] += day_data.get("cached_tokens", 0)
+                            result["credits"] += day_data.get("credits", 0.0)
+                            result["count"] += day_data.get("count", 0)
+
+        # 计算缓存命中率
+        if result["prompt_tokens"] > 0:
+            result["cache_hit_rate"] = result["cached_tokens"] / result["prompt_tokens"]
+
+        result["credits"] = round(result["credits"], 4)
+        return result
+
     _points_query_timestamps: dict = {}  # {key_id: last_query_epoch}
 
     def refresh_key_points_if_needed(self, key_id: str):
@@ -2450,7 +2520,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "object": "api.index",
                 "message": "Antigravity Proxy is running",
-                "version": "1.7.9",
+                "version": "1.8.0",
             })
             return
 
