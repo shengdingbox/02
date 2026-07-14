@@ -136,8 +136,7 @@ class ApiClient:
                 domain.encode("latin-1")
                 self.session.headers["X-Domain"] = domain
             except UnicodeEncodeError:
-                logger.warning(f"Domain 含非ASCII字符，跳过 X-Domain header: {domain}")
-
+                logger.warning(f"Domain 含非ASCII字符，跳过 X-Domain header: {domain}") 
         if proxy:
             self.session.proxies = {"http": proxy, "https": proxy}
 

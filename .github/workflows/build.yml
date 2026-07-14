@@ -41,29 +41,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build with PyInstaller
+      - name: Build with Nuitka
         run: |
-          python -m PyInstaller antigravity.spec --noconfirm
+          python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool.exe" app.py
 
       - name: Package as zip
         run: |
-          cd "dist"
-          Compress-Archive -Path "Antigravity Tools" -DestinationPath "Antigravity-Tools-Windows-x64.zip"
-          # 增量包（只含 src/ 目录）
-          Compress-Archive -Path "Antigravity Tools\_internal\src" -DestinationPath "Antigravity-Tools-Windows-x64-src.zip"
+          cd dist
+          Compress-Archive -Path "app.dist" -DestinationPath "BuddyTool-Windows-x64.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: |
-            dist/Antigravity-Tools-Windows-x64.zip
-            dist/Antigravity-Tools-Windows-x64-src.zip
+            dist/BuddyTool-Windows-x64.zip
 
   build-macos-intel:
     runs-on: macos-14
     env:
-      PYINSTALLER_TARGET_ARCH: x86_64
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -92,28 +88,25 @@ jobs:
           arch -x86_64 python -c "import platform; print(f'Python arch: {platform.machine()}')"
           file $(arch -x86_64 python -c "import sys; print(sys.executable)")
 
-      - name: Build with PyInstaller (x86_64 via Rosetta)
+      - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m PyInstaller antigravity-mac.spec --noconfirm
+          arch -x86_64 python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" app.py
 
       - name: Verify app architecture
         run: |
-          file "dist/Antigravity Tools.app/Contents/MacOS/"*
+          file "dist/app.dist/BuddyTool"
 
       - name: Package with ditto
         run: |
           cd dist
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "Antigravity Tools.app" "Antigravity-Tools-macOS-Intel.zip"
-          cd "Antigravity Tools.app/Contents/Resources"
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "src" "../../../Antigravity-Tools-macOS-Intel-src.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "app.dist" "BuddyTool-macOS-Intel.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-intel-build
           path: |
-            dist/Antigravity-Tools-macOS-Intel.zip
-            dist/Antigravity-Tools-macOS-Intel-src.zip
+            dist/BuddyTool-macOS-Intel.zip
 
   build-macos-arm:
     runs-on: macos-14
@@ -143,31 +136,27 @@ jobs:
         run: |
           test "$(python -c 'import platform; print(platform.machine())')" = "arm64"
 
-      - name: Build with PyInstaller
+      - name: Build with Nuitka
         run: |
-          python -m PyInstaller antigravity-mac.spec --noconfirm
+          python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" app.py
 
       - name: Verify ARM app architecture
         run: |
-          APP_EXE="dist/Antigravity Tools.app/Contents/MacOS/Antigravity Tools"
+          APP_EXE="dist/app.dist/BuddyTool"
           test -x "$APP_EXE"
           file "$APP_EXE" | grep -q 'arm64'
-          lipo -archs "$APP_EXE" | tr ' ' '\n' | grep -qx 'arm64'
 
       - name: Package with ditto
         run: |
           cd dist
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "Antigravity Tools.app" "Antigravity-Tools-macOS-ARM.zip"
-          cd "Antigravity Tools.app/Contents/Resources"
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "src" "../../../Antigravity-Tools-macOS-ARM-src.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "app.dist" "BuddyTool-macOS-ARM.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm-build
           path: |
-            dist/Antigravity-Tools-macOS-ARM.zip
-            dist/Antigravity-Tools-macOS-ARM-src.zip
+            dist/BuddyTool-macOS-ARM.zip
 
   release:
     # Tag push alone never publishes. Manual dispatch must explicitly set publish=true.
@@ -206,33 +195,29 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
-          name: Antigravity Tools v${{ steps.version.outputs.version }}
+          name: Buddy Tool v${{ steps.version.outputs.version }}
           body: |
-            ## Antigravity Tools v${{ steps.version.outputs.version }}
+            ## Buddy Tool v${{ steps.version.outputs.version }}
 
             ### 下载
 
             | 平台 | 文件 |
             |------|------|
-            | Windows x64 | Antigravity-Tools-Windows-x64.zip |
-            | macOS Intel | Antigravity-Tools-macOS-Intel.zip |
-            | macOS ARM (M1/M2/M3) | Antigravity-Tools-macOS-ARM.zip |
+            | Windows x64 | BuddyTool-Windows-x64.zip |
+            | macOS Intel | BuddyTool-macOS-Intel.zip |
+            | macOS ARM (M1/M2/M3) | BuddyTool-macOS-ARM.zip |
 
             ### 安装
 
-            **Windows**: 下载 zip 解压，运行 `Antigravity Tools.exe`
+            **Windows**: 下载 zip 解压，运行 `BuddyTool.exe`
 
-            **macOS**: 下载 zip 解压，将 `Antigravity Tools.app` 拖到"应用程序"文件夹
-            首次打开右键 → 打开（绕过 Gatekeeper）
+            **macOS**: 下载 zip 解压，运行 `BuddyTool`
 
             ### 版本号
             ${{ steps.version.outputs.version }}
           files: |
-            artifacts/windows-build/Antigravity-Tools-Windows-x64.zip
-            artifacts/windows-build/Antigravity-Tools-Windows-x64-src.zip
-            artifacts/macos-intel-build/Antigravity-Tools-macOS-Intel.zip
-            artifacts/macos-intel-build/Antigravity-Tools-macOS-Intel-src.zip
-            artifacts/macos-arm-build/Antigravity-Tools-macOS-ARM.zip
-            artifacts/macos-arm-build/Antigravity-Tools-macOS-ARM-src.zip
+            artifacts/windows-build/BuddyTool-Windows-x64.zip
+            artifacts/macos-intel-build/BuddyTool-macOS-Intel.zip
+            artifacts/macos-arm-build/BuddyTool-macOS-ARM.zip
           draft: false
           prerelease: false

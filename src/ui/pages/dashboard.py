@@ -746,8 +746,9 @@ class DashboardPage(QWidget):
             else:
                 self._quota_progress.setValue(0)
         else:
+            err = result.get("error", "无响应") if result else "无响应"
             self._quota_value_label.setText("--")
-            self._quota_packages_label.setText("查询失败")
+            self._quota_packages_label.setText(f"查询失败: {err[:40]}")
             self._quota_badge_label.setText("错误")
             self._quota_progress.setValue(0)
 

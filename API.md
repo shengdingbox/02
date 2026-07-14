@@ -1,6 +1,6 @@
 # Buddy Server API 接口文档
 
-> Base URL: `http://127.0.0.1:8787`
+> Base URL: `http://47.83.145.136:8787`
 > 版本: v1.0.0
 
 ---
@@ -9,7 +9,7 @@
 
 ### 概述
 
-公开接口（无需鉴权的 POST 接口）支持 **AES-256-GCM 加密传输**。客户端可选择加密或明文发送请求，服务端会自动识别。响应体始终加密返回。
+公开接口（无需鉴权的 POST 接口）**强制使用** AES-256-GCM 加密传输。请求体必须加密，明文请求将被拒绝（返回 400）。响应体始终加密返回。
 
 ### AES-256-GCM 加密
 
@@ -21,6 +21,44 @@
 | Tag | 16 字节认证标签 |
 | 密文格式 | `base64(nonce(12) + tag(16) + ciphertext)` |
 | 传输格式 | `{"data": "<base64密文>"}` |
+
+### HMAC-SHA256 签名 (V1)
+
+所有公开接口**必须**携带签名请求头，否则返回 401。
+
+| 请求头 | 说明 |
+|--------|------|
+| `X-API-Key` | API Key，固定值 `buddy-public` |
+| `X-Timestamp` | 当前 Unix 时间戳（秒），服务端允许 ±300 秒误差 |
+| `X-API-Sign` | HMAC-SHA256 签名 |
+| `X-Sign-Method` | 固定值 `hmac-sha256` |
+
+**签名算法**:
+```
+HMAC_KEY = "d091d26fa339be10d3eabd28419ec943"
+message = "api_key={API_Key}&timestamp={timestamp}"
+sign = HMAC-SHA256(HMAC_KEY, message)  # 返回 hex 字符串
+```
+
+**Python 签名示例**:
+```python
+import hmac, hashlib, time
+
+API_KEY = "buddy-public"
+HMAC_KEY = b"d091d26fa339be10d3eabd28419ec943"
+
+timestamp = str(int(time.time()))
+msg = f"api_key={API_KEY}&timestamp={timestamp}"
+sign = hmac.new(HMAC_KEY, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+headers = {
+    "X-API-Key": API_KEY,
+    "X-Timestamp": timestamp,
+    "X-API-Sign": sign,
+    "X-Sign-Method": "hmac-sha256",
+    "Content-Type": "application/json",
+}
+```
 
 ### 请求体加密流程
 
@@ -90,11 +128,25 @@ def decrypt_body(body_text: str) -> dict:
     return json.loads(pt.decode("utf-8"))
 
 # 示例: 加密请求兑换接口
-import requests
+import requests, hmac, hashlib, time
+
+API_KEY = "buddy-public"
+HMAC_KEY = b"d091d26fa339be10d3eabd28419ec943"
+
+timestamp = str(int(time.time()))
+msg = f"api_key={API_KEY}&timestamp={timestamp}"
+sign = hmac.new(HMAC_KEY, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
 enc_body = encrypt_body({"cardKey": "BC_xxx", "userKey": "bc_xxx", "operator": "user"})
-resp = requests.post("http://127.0.0.1:8787/api/redeem",
+resp = requests.post("http://47.83.145.136:8787/api/redeem",
                      data=enc_body,
-                     headers={"Content-Type": "application/json"})
+                     headers={
+                         "Content-Type": "application/json",
+                         "X-API-Key": API_KEY,
+                         "X-Timestamp": timestamp,
+                         "X-API-Sign": sign,
+                         "X-Sign-Method": "hmac-sha256",
+                     })
 result = decrypt_body(resp.text)
 print(result)
 ```
@@ -163,11 +215,6 @@ POST /api/redeem
 **加密请求示例**:
 ```json
 {"data": "加密后的base64字符串"}
-```
-
-**明文请求示例**（兼容）:
-```json
-{"cardKey": "BC_xxx", "userKey": "bc_xxx", "operator": "user"}
 ```
 
 **成功响应**（加密，解密后）:
@@ -266,16 +313,16 @@ POST /api/usage/report
 ### 4. 查询用户积分
 
 ```
-GET /api/user/credits?userKey=bc_xxx
+POST /api/user/credits
 ```
 
-**Query 参数**:
+**请求体**（必须加密）:
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| userKey | string | 是 | 机器码/上游key |
+| userKey | string | 是 | 机器码 |
 
-**响应**（明文）:
+**响应**（加密，解密后）:
 ```json
 {
   "credits": 100.0,
@@ -411,7 +458,6 @@ Access-Control-Allow-Headers: Authorization, Content-Type, x-api-key
 
 ### 加密兼容性
 
-- **请求**: 服务端自动检测请求体格式，加密格式 `{"data": "..."}` 和明文 JSON 均可接受
-- **响应**: 加密接口的响应始终为加密格式（响应头 `X-Encrypted: 1`），GET 接口响应为明文
-- **加密接口**: `POST /api/redeem`、`POST /api/buddykey/get`、`POST /api/usage/report`
-- **明文接口**: 所有 GET 接口、`POST /api/activate`、所有管理接口
+- **请求**: 公开 POST 接口（`/api/redeem`、`/api/buddykey/get`、`/api/usage/report`）**必须**使用加密格式 `{"data": "<base64>"}`，明文请求会被拒绝（返回 400 错误）
+- **响应**: 加密接口的响应始终为加密格式（响应头 `X-Encrypted: 1`）
+- **明文接口**: `GET /api/user/today-usage`、`POST /api/activate`、所有管理接口使用明文 JSON

@@ -1,11 +1,14 @@
 """服务端 API 客户端 — 积分查询、卡密兑换等
 
-与 http://47.83.145.136:8787 通信，支持 AES-256-GCM 加密传输。
+与 http://47.83.145.136:8787 通信，支持 AES-256-GCM 加密传输 + HMAC-SHA256 签名。
 """
 
 import json
 import base64
 import os
+import time
+import hmac
+import hashlib
 import logging
 import requests
 
@@ -18,6 +21,27 @@ SERVER_BASE = "http://47.83.145.136:8787"
 # AES-256-GCM 密钥（与服务端一致，hex → 32 字节）
 _AES_KEY_HEX = "e7283867e8d5a1da2f67de4727f12e26ca4d2f7ae83e51dd208d18e75016ed4a"
 _AES_KEY = bytes.fromhex(_AES_KEY_HEX)
+
+# HMAC-SHA256 签名
+_API_KEY = "buddy-public"
+_HMAC_KEY = b"d091d26fa339be10d3eabd28419ec943"
+
+# 绕过系统代理，直连服务端
+_NO_PROXY = {"http": None, "https": None}
+
+
+def _build_signed_headers() -> dict:
+    """构建带 HMAC-SHA256 签名的请求头"""
+    timestamp = str(int(time.time()))
+    msg = f"api_key={_API_KEY}&timestamp={timestamp}"
+    sign = hmac.new(_HMAC_KEY, msg.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "X-API-Key": _API_KEY,
+        "X-Timestamp": timestamp,
+        "X-API-Sign": sign,
+        "X-Sign-Method": "hmac-sha256",
+    }
 
 
 def _encrypt_body(data: dict) -> str:
@@ -87,7 +111,7 @@ def _decrypt_body(body_text: str) -> dict:
 
 
 def get_credits(user_key: str = None) -> dict:
-    """查询用户积分额度（GET 明文接口）
+    """查询用户积分额度（POST 加密接口）
 
     Args:
         user_key: 用户密钥（机器码），为空时使用本机动态机器码
@@ -107,10 +131,18 @@ def get_credits(user_key: str = None) -> dict:
 
     key = user_key or get_machine_code()
     url = f"{SERVER_BASE}/api/user/credits"
+    payload = {"userKey": key}
+
     try:
-        resp = requests.get(url, params={"userKey": key}, timeout=15, proxies={"http": None, "https": None})
+        encrypted_body = _encrypt_body(payload)
+        resp = requests.post(
+            url,
+            data=encrypted_body,
+            headers=_build_signed_headers(),
+            timeout=15,
+            proxies=_NO_PROXY,
+        )
         if resp.ok:
-            # GET 接口也可能返回加密数据，统一用 _decrypt_body 处理（自动识别明文/密文）
             return _decrypt_body(resp.text)
         else:
             return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
@@ -147,9 +179,9 @@ def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:
         resp = requests.post(
             url,
             data=encrypted_body,
-            headers={"Content-Type": "application/json"},
+            headers=_build_signed_headers(),
             timeout=30,
-            proxies={"http": None, "https": None},
+            proxies=_NO_PROXY,
         )
         # 响应始终加密
         return _decrypt_body(resp.text)
@@ -180,9 +212,9 @@ def get_buddykey(user_key: str = None) -> dict:
         resp = requests.post(
             url,
             data=encrypted_body,
-            headers={"Content-Type": "application/json"},
+            headers=_build_signed_headers(),
             timeout=30,
-            proxies={"http": None, "https": None},
+            proxies=_NO_PROXY,
         )
         return _decrypt_body(resp.text)
     except Exception as e:
@@ -231,9 +263,9 @@ def report_usage(
         resp = requests.post(
             url,
             data=encrypted_body,
-            headers={"Content-Type": "application/json"},
+            headers=_build_signed_headers(),
             timeout=15,
-            proxies={"http": None, "https": None},
+            proxies=_NO_PROXY,
         )
         return _decrypt_body(resp.text)
     except Exception as e:

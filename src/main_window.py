@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
         self.apply_theme(self._current_theme)
 
         # 自动更新
-        self._setup_updater()
+        # self._setup_updater()  # 自动更新暂时关闭
 
         # 自动签到：启动 5 秒后执行一次，之后每小时执行一次
         self._checkin_timer = QTimer(self)
@@ -91,8 +91,8 @@ class MainWindow(QMainWindow):
 
                 def run(self):
                     from concurrent.futures import ThreadPoolExecutor, as_completed
-                    from ...modules import CheckinManager
-                    from ...utils.store import save_account
+                    from .modules import CheckinManager
+                    from .utils.store import save_account
 
                     success, already, failed = 0, 0, 0
                     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -364,6 +364,10 @@ class MainWindow(QMainWindow):
 
     def _manual_check_update(self):
         """手动检查更新"""
+        if not hasattr(self, '_updater') or self._updater is None:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "检查更新", "自动更新功能已关闭")
+            return
         self._updater._manual_check = True
         self._updater.check_update()
 
