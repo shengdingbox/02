@@ -5,7 +5,7 @@ import logging
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame,
     QPushButton, QButtonGroup, QApplication, QScrollArea, QSpinBox, QComboBox,
-    QMessageBox, QCheckBox
+    QMessageBox, QCheckBox, QProgressBar, QDialog
 )
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPalette
@@ -193,7 +193,6 @@ class DashboardPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("content_area")
-        self._usage_range = "today"  # 使用情况时间范围: today/7d/30d/all
         self._colors = _current_theme_colors()
         self._scale = 1.0
         self._all_cards = []
@@ -210,7 +209,7 @@ class DashboardPage(QWidget):
         title.setObjectName("page_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("全局概览（本地数据，需查询请前往对应页面）")
+        subtitle = QLabel("积分额度 · API 代理 · 使用统计")
         subtitle.setObjectName("page_subtitle")
         layout.addWidget(subtitle)
 
@@ -228,20 +227,65 @@ class DashboardPage(QWidget):
         content_layout.setContentsMargins(32, 0, 32, 32)
         content_layout.setSpacing(20)
 
-        # 统计卡片网格
-        grid = QGridLayout()
-        grid.setSpacing(16)
+        # === 激活卡密按钮 + 积分进度条 ===
+        quota_card = QFrame()
+        quota_card.setObjectName("proxy_control_card")
+        quota_layout = QHBoxLayout(quota_card)
+        quota_layout.setContentsMargins(20, 16, 20, 16)
+        quota_layout.setSpacing(16)
 
-        self._card_total = StatCard("总账号数", "--", "👥", "accent")
-        self._card_active = StatCard("活跃账号", "--", "✅", "success")
-        self._card_quota = StatCard("总剩余积分", "--", "💎", "accent")
+        quota_icon_label = QLabel("💎")
+        quota_icon_label.setStyleSheet("font-size: 32px;")
+        quota_layout.addWidget(quota_icon_label)
 
-        grid.addWidget(self._card_total, 0, 0)
-        grid.addWidget(self._card_active, 0, 1)
-        grid.addWidget(self._card_quota, 0, 2)
+        quota_text_col = QVBoxLayout()
+        quota_text_col.setSpacing(6)
+        quota_text_col.addWidget(QLabel("积分包余额"))
+        self._quota_value_label = QLabel("--")
+        self._quota_value_label.setStyleSheet("font-size: 28px; font-weight: 700;")
+        self._quota_packages_label = QLabel("")
+        self._quota_packages_label.setStyleSheet("color: #9BA4B0; font-size: 13px;")
+        quota_text_col.addWidget(self._quota_value_label)
+        quota_text_col.addWidget(self._quota_packages_label)
+        quota_layout.addLayout(quota_text_col)
 
-        content_layout.addLayout(grid)
-        self._account_grid = grid
+        self._quota_progress = QProgressBar()
+        self._quota_progress.setRange(0, 100)
+        self._quota_progress.setValue(0)
+        self._quota_progress.setTextVisible(False)
+        self._quota_progress.setFixedHeight(8)
+        quota_layout.addWidget(self._quota_progress, 1)
+
+        self._quota_badge_label = QLabel("--")
+        self._quota_badge_label.setStyleSheet(
+            "background-color: rgba(56,161,105,0.1); color: #38A169; "
+            "border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
+        )
+        quota_layout.addWidget(self._quota_badge_label)
+
+        # 激活卡密按钮
+        self._btn_activate = QPushButton(f"🔑 {t('accounts.add_account')}")
+        self._btn_activate.setObjectName("primary_btn")
+        self._btn_activate.setCursor(Qt.PointingHandCursor)
+        self._btn_activate.setMinimumHeight(36)
+        self._btn_activate.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self._colors['accent']};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['accent_hover']};
+            }}
+        """)
+        self._btn_activate.clicked.connect(self._activate_card)
+        quota_layout.addWidget(self._btn_activate)
+
+        content_layout.addWidget(quota_card)
 
         # === API 代理服务控制区 ===
         self._proxy_control_card = QFrame()
@@ -490,116 +534,19 @@ class DashboardPage(QWidget):
 
         content_layout.addWidget(self._proxy_control_card)
 
-        # === 使用情况区域 ===
-        self._usage_title = QLabel("📊 使用情况")
-        self._usage_title.setStyleSheet(
-            f"font-size: 16px; font-weight: 600; margin-top: 8px; color: {self._colors['text_primary']};"
-        )
-        content_layout.addWidget(self._usage_title)
-
-        # 时间范围切换按钮
-        range_layout = QHBoxLayout()
-        range_layout.setSpacing(8)
-
-        self._range_btn_group = QButtonGroup(self)
-        self._range_btn_group.setExclusive(True)
-
-        range_configs = [
-            ("today", "今日"),
-            ("7d", "近7天"),
-            ("30d", "近30天"),
-            ("all", "总计"),
+        # === 诊断项定义（名称, 描述）— 弹窗形式，启动服务时展示 ===
+        self._diag_items_def = [
+            ("服务端口监听检查",  "端口 {port} 正在监听"),
+            ("HTTP 接口健康检查",  "接口响应正常"),
+            ("端口占用检测",       "端口 {port} 未被占用"),
+            ("Windows 端口预留检查","端口 {port} 不在系统预留段内"),
+            ("系统代理检测",       "系统代理未开启"),
+            ("Windows 防火墙状态", "所有防火墙配置文件均已关闭"),
+            ("hosts 文件检查",     "hosts 文件无异常"),
+            ("云端服务连通性",     "云端服务端口可达"),
         ]
-        self._range_buttons = []
-        for key, label_text in range_configs:
-            btn = QPushButton(label_text)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setProperty("range_key", key)
-            if key == self._usage_range:
-                btn.setChecked(True)
-                btn.setStyleSheet(self._range_btn_style_active())
-            else:
-                btn.setStyleSheet(self._range_btn_style_normal())
-            self._range_btn_group.addButton(btn)
-            self._range_buttons.append(btn)
-            range_layout.addWidget(btn)
-
-        range_layout.addStretch()
-        content_layout.addLayout(range_layout)
-
-        self._range_btn_group.buttonClicked.connect(self._on_range_changed)
-
-        # 使用情况统计卡片（5个）
-        usage_grid = QGridLayout()
-        usage_grid.setSpacing(16)
-
-        self._usage_card_credits = StatCard("消耗积分", "--", "💰", "warning")
-        self._usage_card_prompt = StatCard("输入", "--", "⬆️", "accent")
-        self._usage_card_completion = StatCard("输出", "--", "⬇️", "success")
-        self._usage_card_total = StatCard("总Token", "--", "🔢", "accent")
-        self._usage_card_count = StatCard("请求数量", "--", "📈", "accent")
-
-        usage_grid.addWidget(self._usage_card_credits, 0, 0)
-        usage_grid.addWidget(self._usage_card_prompt, 0, 1)
-        usage_grid.addWidget(self._usage_card_completion, 0, 2)
-        usage_grid.addWidget(self._usage_card_total, 0, 3)
-        usage_grid.addWidget(self._usage_card_count, 0, 4)
-
-        content_layout.addLayout(usage_grid)
-        self._usage_grid = usage_grid
-
-        # 缓存命中率图表区域
-        self._cache_frame = QFrame()
-        self._apply_cache_frame_style()
-        cache_layout = QHBoxLayout(self._cache_frame)
-        cache_layout.setContentsMargins(20, 16, 20, 16)
-        cache_layout.setSpacing(20)
-
-        # 环形图
-        self._cache_chart = CacheHitRateChart()
-
-        # 右侧：标题 + 命中详情
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setSpacing(12)
-
-        self._cache_title = QLabel("命中率统计")
-        self._cache_title.setStyleSheet(
-            f"font-size: 14px; font-weight: 600; color: {self._colors['text_primary']};"
-        )
-        right_layout.addWidget(self._cache_title)
-
-        # 6 项命中指标（3行 x 2列）
-        self._legend_labels = {}
-        self._legend_values = {}
-        legend_grid = QGridLayout()
-        legend_grid.setSpacing(8)
-
-        legend_items = [
-            ("input_hit", "输入命中", "success"),
-            ("input_rate", "输入命中率", "success"),
-            ("output_hit", "输出命中", "text_tertiary"),
-            ("output_rate", "输出命中率", "text_tertiary"),
-            ("total_hit", "总命中", "accent"),
-            ("total_rate", "总命中率", "accent"),
-        ]
-        for idx, (key, label_text, color_key) in enumerate(legend_items):
-            row = idx // 2
-            col = idx % 2
-            label = QLabel()
-            label.setTextFormat(Qt.TextFormat.RichText)
-            legend_grid.addWidget(label, row, col)
-            self._legend_labels[key] = (label, color_key, label_text)
-            self._legend_values[key] = "--"
-            self._render_legend(key)
-
-        right_layout.addLayout(legend_grid)
-        right_layout.addStretch()
-
-        cache_layout.addWidget(self._cache_chart)
-        cache_layout.addWidget(right_panel, 1)
-        content_layout.addWidget(self._cache_frame)
+        self._diag_dialog = None
+        self._diag_rows = []
 
         content_layout.addStretch()
 
@@ -609,12 +556,8 @@ class DashboardPage(QWidget):
         # 显式设置背景色（必须在 setWidget 之后，QScrollArea viewport 默认用系统 palette 不跟主题）
         self._apply_scroll_background()
 
-        # 收集所有静态卡片用于缩放
-        self._all_cards = [
-            self._card_total, self._card_active, self._card_quota,
-            self._usage_card_credits, self._usage_card_prompt, self._usage_card_completion,
-            self._usage_card_total, self._usage_card_count,
-        ]
+        # 收集所有静态卡片用于缩放（使用情况图表已移至额度管理页面）
+        self._all_cards = []
 
     # === 响应式缩放 ===
 
@@ -626,7 +569,7 @@ class DashboardPage(QWidget):
     def _apply_responsive_scale(self):
         """根据当前可用宽度计算缩放比例并应用到所有UI元素"""
         # 安全检查：UI 未完全初始化时跳过（resizeEvent 可能在 _setup_ui 期间被触发）
-        if not getattr(self, '_all_cards', None) or not hasattr(self, '_cache_chart'):
+        if not getattr(self, '_all_cards', None):
             return
         w = self.width()
         if w <= 0:
@@ -638,35 +581,6 @@ class DashboardPage(QWidget):
         # 缩放所有静态卡片
         for card in self._all_cards:
             card.apply_scale(s)
-
-        # 缩放环形图
-        self._cache_chart.apply_scale(s)
-
-        # 缩放网格间距
-        spacing = int(16 * s)
-        self._account_grid.setSpacing(spacing)
-        self._usage_grid.setSpacing(spacing)
-
-        # 缩放区域标题
-        self._usage_title.setStyleSheet(
-            f"font-size: {int(16 * s)}px; font-weight: 600; margin-top: 8px; color: {self._colors['text_primary']};"
-        )
-
-        # 缩放缓存区域标题
-        self._cache_title.setStyleSheet(
-            f"font-size: {int(14 * s)}px; font-weight: 600; color: {self._colors['text_primary']};"
-        )
-
-        # 缩放图例文字（重新渲染，带缩放后的字号）
-        for key in self._legend_labels:
-            self._render_legend(key)
-
-        # 缩放时间范围按钮
-        for btn in self._range_buttons:
-            if btn.isChecked():
-                btn.setStyleSheet(self._range_btn_style_active())
-            else:
-                btn.setStyleSheet(self._range_btn_style_normal())
 
     # === 主题相关 ===
 
@@ -707,15 +621,11 @@ class DashboardPage(QWidget):
             )
 
     def _apply_cache_frame_style(self):
-        """缓存命中率图表区域样式"""
-        c = self._colors
-        self._cache_frame.setStyleSheet(
-            f"QFrame {{ background-color: {c['bg_secondary']}; "
-            f"border: 1px solid {c['border']}; border-radius: 8px; }}"
-        )
+        """缓存命中率图表区域样式（已移至额度管理页面，保留空方法避免外部调用报错）"""
+        pass
 
     def _range_btn_style_active(self) -> str:
-        """选中状态按钮样式（跟随缩放）"""
+        """选中状态按钮样式（已移至额度管理页面）"""
         c = self._colors
         s = self._scale
         pad_v = int(6 * s)
@@ -727,7 +637,7 @@ class DashboardPage(QWidget):
         )
 
     def _range_btn_style_normal(self) -> str:
-        """未选中状态按钮样式（跟随缩放）"""
+        """未选中状态按钮样式（已移至额度管理页面）"""
         c = self._colors
         s = self._scale
         pad_v = int(6 * s)
@@ -746,10 +656,6 @@ class DashboardPage(QWidget):
         # QScrollArea 背景跟随主题（viewport 默认灰白不跟主题）
         self._apply_scroll_background()
 
-        # 缓存命中率图表
-        self._cache_chart.apply_theme(self._colors)
-        self._apply_cache_frame_style()
-
         # 统计卡片
         for card in self._all_cards:
             card.apply_theme(self._colors)
@@ -760,18 +666,11 @@ class DashboardPage(QWidget):
         # 重新应用响应式缩放（会刷新所有带缩放的样式）
         self._apply_responsive_scale()
 
-    # === 数字格式化 ===
+    # === 数字格式化（保留静态方法供其他页面调用） ===
 
     @staticmethod
     def _format_token_count(value: int) -> str:
-        """将 Token/数字按大小格式化为中文单位，保留 2 位小数
-
-        规则：
-        - < 1万：原样显示（千分位）
-        - 1万 ~ < 1百万：以"万"为单位（如 12.34万）
-        - 1百万 ~ < 1亿：以"百万"为单位（如 12.34百万）
-        - >= 1亿：以"亿"为单位（如 1.23亿）
-        """
+        """将 Token/数字按大小格式化为中文单位，保留 2 位小数"""
         v = float(value)
         if v < 10_000:
             return f"{int(v):,}"
@@ -781,116 +680,297 @@ class DashboardPage(QWidget):
             return f"{v / 1_000_000:.2f}百万"
         return f"{v / 100_000_000:.2f}亿"
 
-    # === 图例渲染 ===
+    # === 图例渲染（已移至额度管理页面，保留空方法避免外部调用报错） ===
 
     def _render_legend(self, key: str):
-        """渲染单项图例（富文本：彩色圆点 + 标签 + 值，字号跟随缩放）"""
-        if key not in self._legend_labels:
-            return
-        label, color_key, label_text = self._legend_labels[key]
-        value = self._legend_values.get(key, "--")
-        color_val = self._colors.get(color_key, self._colors["accent"])
-        text_col = self._colors["text_secondary"]
-        font_size = int(13 * self._scale)
-        label.setText(
-            f'<span style="color:{color_val}; font-size:{font_size}px;">●</span> '
-            f'<span style="color:{text_col}; font-size:{font_size}px;">{label_text}  {value}</span>'
-        )
+        pass
 
     def _update_legend(self, key: str, value: str):
-        """更新单项图例的数值"""
-        if key in self._legend_labels:
-            self._legend_values[key] = value
-            self._render_legend(key)
+        pass
 
     def _refresh_legend_colors(self):
-        """主题切换后刷新所有图例颜色（保持数值不变）"""
-        for key in self._legend_labels:
-            self._render_legend(key)
+        pass
 
     # === 事件回调 ===
 
     def _on_range_changed(self, btn):
-        """时间范围切换回调"""
-        key = btn.property("range_key")
-        if key and key != self._usage_range:
-            self._usage_range = key
-            for b in self._range_buttons:
-                if b.isChecked():
-                    b.setStyleSheet(self._range_btn_style_active())
-                else:
-                    b.setStyleSheet(self._range_btn_style_normal())
-            self._refresh_usage()
+        """时间范围切换回调（已移至额度管理页面）"""
+        pass
 
     def _refresh_usage(self):
-        """刷新使用情况数据"""
-        db = ProxyDatabase.get_instance()
-        days_map = {"today": 1, "7d": 7, "30d": 30, "all": None}
-        days = days_map.get(self._usage_range, 1)
-        summary = db.get_usage_summary(days=days)
-
-        # 更新5个统计卡片
-        prompt = summary["prompt_tokens"]
-        completion = summary["completion_tokens"]
-        total_tokens = prompt + completion
-        cached = summary["cached_tokens"]
-
-        self._usage_card_credits.set_value(f"{summary['credits']:,.2f}")
-        self._usage_card_prompt.set_value(self._format_token_count(prompt))
-        self._usage_card_completion.set_value(self._format_token_count(completion))
-        self._usage_card_total.set_value(self._format_token_count(total_tokens))
-        self._usage_card_count.set_value(self._format_token_count(summary["count"]))
-
-        # 计算各项命中率
-        input_hit = cached
-        input_rate = cached / prompt if prompt > 0 else 0.0
-        output_hit = 0  # 输出无缓存命中机制
-        output_rate = 0.0
-        total_hit = cached  # 输入命中 + 输出命中(0)
-        total_rate = cached / total_tokens if total_tokens > 0 else 0.0
-
-        # 更新环形图（中心显示总命中率）
-        self._cache_chart.set_rate(total_rate)
-
-        # 更新 6 项图例
-        self._update_legend("input_hit", self._format_token_count(input_hit))
-        self._update_legend("input_rate", f"{input_rate * 100:.1f}%")
-        self._update_legend("output_hit", self._format_token_count(output_hit))
-        self._update_legend("output_rate", f"{output_rate * 100:.1f}%")
-        self._update_legend("total_hit", self._format_token_count(total_hit))
-        self._update_legend("total_rate", f"{total_rate * 100:.1f}%")
+        """刷新使用情况数据（已移至额度管理页面）"""
+        pass
 
     def _refresh_data(self):
-        """刷新仪表盘数据（纯本地，不联网）"""
-        accounts = load_accounts()
+        """刷新仪表盘数据"""
+        self._refresh_credits()
 
-        # 统计卡片
-        total = len(accounts)
-        active = len([a for a in accounts if a.status == AccountStatus.ACTIVE])
+    def _refresh_credits(self):
+        """后台查询服务端积分"""
+        self._quota_value_label.setText("⏳")
+        self._quota_packages_label.setText("查询中...")
+        self._quota_badge_label.setText("--")
+        self._quota_progress.setValue(0)
 
-        # 计算总积分（仅统计已查询过的）
-        has_queried = [a for a in accounts if a.quota.credits_total > 0]
-        total_credits = sum(a.quota.credits_remaining for a in has_queried)
+        from PySide6.QtCore import QThread, Signal as QSignal
 
-        self._card_total.set_value(str(total))
-        self._card_active.set_value(str(active))
-        if has_queried:
-            self._card_quota.set_value(f"{total_credits:.0f}")
+        class CreditsThread(QThread):
+            done = QSignal(object)
+
+            def run(self):
+                from ...utils.server_api import get_credits
+                result = get_credits()
+                self.done.emit(result)
+
+        self._credits_thread = CreditsThread()
+        self._credits_thread.done.connect(self._on_credits_done)
+        self._credits_thread.start()
+
+    def _on_credits_done(self, result: dict):
+        """积分查询完成"""
+        if result and "credits" in result:
+            credits = result.get("credits", 0)
+            total_recharged = result.get("totalRecharged", 0)
+            total_used = result.get("totalUsed", 0)
+            today_used = result.get("todayUsed", 0)
+
+            self._quota_value_label.setText(f"{credits:.2f}")
+            self._quota_packages_label.setText(
+                f"累计充值 {total_recharged:.0f} · 已用 {total_used:.0f} · 今日 {today_used:.0f}"
+            )
+            self._quota_badge_label.setText(f"剩余 {credits:.0f}")
+
+            if total_recharged > 0:
+                percent = int(min(100, max(0, (credits / total_recharged) * 100)))
+                self._quota_progress.setValue(percent)
+            else:
+                self._quota_progress.setValue(0)
         else:
-            self._card_quota.set_value("--")
+            self._quota_value_label.setText("--")
+            self._quota_packages_label.setText("查询失败")
+            self._quota_badge_label.setText("错误")
+            self._quota_progress.setValue(0)
 
-        # 刷新使用情况
-        self._refresh_usage()
+    def _activate_card(self):
+        """打开激活卡密对话框"""
+        from .accounts import AddAccountDialog
+        dialog = AddAccountDialog(self)
+        dialog.account_added.connect(lambda _: self._refresh_credits())
+        dialog.exec()
 
     def set_proxy_page(self, proxy_page):
         """注入 ApiProxyPage 引用，用于服务控制"""
         self._proxy_page = proxy_page
 
+    def _build_diag_row(self, name: str, desc: str) -> tuple:
+        """构建诊断项单行（状态徽章 + 名称 + 描述），返回 (row_layout, badge_label, name_label, desc_label)"""
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        # 状态徽章（初始=灰色"检测中"）
+        badge_style = (
+            "background-color: rgba(158,164,176,0.12); color: #9BA4B0; "
+            "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
+        )
+        badge = QLabel("检测中")
+        badge.setStyleSheet(badge_style)
+        badge.setFixedWidth(54)
+        badge.setAlignment(Qt.AlignCenter)
+        row.addWidget(badge)
+
+        # 右侧：名称 + 描述（垂直堆叠）
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        name_label = QLabel(name)
+        name_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 600; color: {self._colors['text_primary']};"
+        )
+        text_col.addWidget(name_label)
+        desc_label = QLabel("")
+        desc_label.setStyleSheet(
+            f"font-size: 12px; color: {self._colors['text_tertiary']};"
+        )
+        desc_label.setWordWrap(True)
+        text_col.addWidget(desc_label)
+        row.addLayout(text_col, 1)
+
+        return (row, badge, name_label, desc_label)
+
+    def _set_diag_row_status(self, idx: int, status: str, kind: str):
+        """更新诊断项的状态徽章颜色"""
+        if idx >= len(self._diag_rows):
+            return
+        badge = self._diag_rows[idx][1]
+        badge.setText(status)
+        if kind == "success":
+            badge.setStyleSheet(
+                "background-color: rgba(56,161,105,0.15); color: #38A169; "
+                "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
+            )
+        elif kind == "error":
+            badge.setStyleSheet(
+                "background-color: rgba(229,62,62,0.12); color: #E53E3E; "
+                "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
+            )
+        else:  # pending
+            badge.setStyleSheet(
+                "background-color: rgba(158,164,176,0.12); color: #9BA4B0; "
+                "border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
+            )
+
+    def _show_diag_dialog(self, port: int):
+        """创建并显示诊断弹窗"""
+        self._diag_dialog = QDialog(self)
+        self._diag_dialog.setWindowTitle("服务启动中")
+        self._diag_dialog.setModal(True)
+        self._diag_dialog.setMinimumWidth(420)
+        self._diag_dialog.setWindowFlags(
+            self._diag_dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
+        )
+
+        layout = QVBoxLayout(self._diag_dialog)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        self._diag_title = QLabel("🔍 服务启动中...")
+        self._diag_title.setStyleSheet(
+            f"font-size: 15px; font-weight: 600; color: {self._colors['text_primary']};"
+        )
+        layout.addWidget(self._diag_title)
+
+        # 构建诊断行
+        self._diag_rows = []
+        for name, desc_template in self._diag_items_def:
+            row, badge, name_label, desc_label = self._build_diag_row(name, "")
+            layout.addLayout(row)
+            self._diag_rows.append((row, badge, name_label, desc_label))
+
+        self._diag_dialog.show()
+
+    def _close_diag_dialog(self):
+        """关闭诊断弹窗"""
+        if self._diag_dialog:
+            self._diag_dialog.close()
+            self._diag_dialog.deleteLater()
+            self._diag_dialog = None
+
+    def _run_diag_animation(self, port: int):
+        """逐条展示诊断进度（过渡动画），完成后触发获取 BuddyKey"""
+        from PySide6.QtCore import QTimer
+
+        self._diag_step = 0
+
+        def _advance():
+            idx = self._diag_step
+            if idx < len(self._diag_items_def):
+                name, desc_template = self._diag_items_def[idx]
+                desc = desc_template.replace("{port}", str(port))
+                # 更新描述
+                desc_label = self._diag_rows[idx][3]
+                desc_label.setText(desc)
+                # 标记为通过
+                self._set_diag_row_status(idx, "通过", "success")
+                self._diag_step += 1
+                # 继续下一项
+                QTimer.singleShot(400, _advance)
+            else:
+                # 全部完成 → 获取 BuddyKey
+                self._fetch_buddykey()
+
+        _advance()
+
     def _toggle_proxy_service(self):
-        """启动/停止代理服务 — 转发给 ApiProxyPage"""
-        if self._proxy_page:
+        """启动/停止代理服务"""
+        if not self._proxy_page:
+            return
+
+        ps = self._proxy_page._proxy_server
+        if ps and ps.is_running:
+            # 服务运行中 → 停止
             self._proxy_page._toggle_service()
             self._sync_proxy_status()
+            return
+
+        # 服务未运行 → 显示诊断弹窗
+        port = self._port_spin.value()
+        self._show_diag_dialog(port)
+        self._toggle_proxy_btn.setEnabled(False)
+        self._proxy_status_label.setText("⏳ 正在启动...")
+        self._proxy_status_label.setStyleSheet("font-weight: 600; color: #D69E2E;")
+
+        # 启动诊断动画
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(200, lambda: self._run_diag_animation(port))
+
+    def _fetch_buddykey(self):
+        """后台请求 BuddyKey"""
+        from PySide6.QtCore import QThread, Signal as QSignal
+
+        class BuddyKeyThread(QThread):
+            done = QSignal(object)
+
+            def run(self):
+                from ...utils.server_api import get_buddykey
+                try:
+                    result = get_buddykey()
+                    self.done.emit(result)
+                except Exception as e:
+                    self.done.emit({"success": False, "message": str(e)})
+
+        self._buddykey_thread = BuddyKeyThread()
+        self._buddykey_thread.done.connect(self._on_buddykey_done)
+        self._buddykey_thread.start()
+
+    def _on_buddykey_done(self, result: dict):
+        """获取 BuddyKey 完成"""
+        if not result or not result.get("success"):
+            err = (result or {}).get("error") or (result or {}).get("message") or "未知错误"
+            self._diag_title.setText("❌ 启动失败")
+            self._proxy_status_label.setText("⏹ 已停止")
+            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
+            self._toggle_proxy_btn.setEnabled(True)
+            self._close_diag_dialog()
+            QMessageBox.warning(self, "启动失败", f"无法获取激活码：{err}")
+            return
+
+        buddy_key = result.get("buddyKey", "")
+        if not buddy_key:
+            self._diag_title.setText("❌ 启动失败")
+            self._proxy_status_label.setText("⏹ 已停止")
+            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
+            self._toggle_proxy_btn.setEnabled(True)
+            self._close_diag_dialog()
+            QMessageBox.warning(self, "启动失败", "服务端未返回激活码")
+            return
+
+        # 将 BuddyKey 作为上游 key 添加到代理数据库
+        import secrets as _sec
+        from datetime import datetime
+        db = self._proxy_page._db
+
+        # 先清除旧的上游 key，只保留新的 BuddyKey
+        for k in db.get_upstream_keys():
+            db.delete_upstream_key(k.get("key_id", ""))
+
+        db.add_upstream_key({
+            "key_id": f"bk_{_sec.token_hex(4)}",
+            "api_key": buddy_key,
+            "label": f"BuddyKey (余额 {result.get('balance', 0):.1f})",
+            "status": "active",
+            "used_count": 0,
+            "points": str(result.get("balance", 0)),
+            "points_updated_at": datetime.now().isoformat(),
+            "created_at": datetime.now().isoformat(),
+        })
+        self._proxy_page._invalidate_proxy_auth_cache()
+
+        # 启动服务
+        self._proxy_page._toggle_service()
+        self._toggle_proxy_btn.setEnabled(True)
+        self._sync_proxy_status()
+
+        # 关闭诊断弹窗
+        self._close_diag_dialog()
 
     def _apply_toggle_btn_style(self):
         """根据服务状态设置按钮内联样式"""

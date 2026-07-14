@@ -3794,8 +3794,23 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                     "duration_ms": duration_ms,
                     "prompt_tokens": last_usage.get("prompt_tokens", 0),
                     "completion_tokens": last_usage.get("completion_tokens", 0),
+                    "credits": credit,
                     "first_token_ms": first_token_ms or 0,
                 })
+
+                # 上报使用量到服务端（本地缓存 + 后台上报）
+                if prompt_t > 0 or completion_t > 0:
+                    try:
+                        from ..utils.usage_reporter import add_pending_report
+                        add_pending_report(
+                            credits_used=credit,
+                            model=model,
+                            request_tokens=prompt_t,
+                            response_tokens=completion_t,
+                            upstream_id=key_id,
+                        )
+                    except Exception as e:
+                        logger.debug(f"[上报] 使用量上报失败: {e}")
 
                 # 请求完成后异步查分（限频 1 分钟/次）
                 self.db.refresh_key_points_if_needed(key_id)

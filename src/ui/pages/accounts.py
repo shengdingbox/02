@@ -6,26 +6,19 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit,
-<<<<<<< HEAD
     QDialog, QTextEdit, QFileDialog, QMessageBox,
-    QMenu, QAbstractItemView, QSpinBox, QProgressBar
+    QMenu, QAbstractItemView, QSpinBox, QProgressBar,
+    QGridLayout, QButtonGroup
 )
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QCursor
-=======
-    QDialog, QFormLayout, QTextEdit, QFileDialog, QMessageBox,
-    QMenu, QSizePolicy, QAbstractItemView, QSpinBox, QProgressBar,
-    QCheckBox, QGroupBox, QStackedWidget, QScrollArea
-)
-from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QAction, QCursor, QPalette, QColor
->>>>>>> origin/main
 
 from ...i18n import t
 from ...models import Account, Platform, AccountStatus, ResourcePackage
 from ...utils.store import load_accounts, save_account, delete_account, save_setting, load_setting
 from ...modules.api_client import ApiClient, check_api_key_chat_status
 from ..styles.theme import DARK_THEME, LIGHT_THEME
+from .dashboard import StatCard, CacheHitRateChart
 
 logger = logging.getLogger(__name__)
 
@@ -44,19 +37,21 @@ def _current_theme_colors() -> dict:
 
 
 class AddAccountDialog(QDialog):
-    """添加账号对话框 — 卡密导入（单行）
+    """激活卡密对话框
 
-    只保留一个 apikey 输入框，昵称自动随机生成。
-    点击「导入」后自动保存账号、同步上游 Key 池、查询积分。
+    输入卡密，调用服务端 /api/redeem 接口激活，
+    激活成功后卡密和返回的 userKey 存到本地。
     """
 
     account_added = Signal(Account)
 
+    REDEEM_URL = "http://47.83.145.136:8787/api/redeem"
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(t("accounts.add_account"))
+        self.setWindowTitle("激活卡密")
         self.setMinimumWidth(460)
-        self._query_thread = None
+        self._redeem_thread = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -65,16 +60,16 @@ class AddAccountDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
 
         # 说明
-        hint = QLabel("输入 API Key (ck_xxx) 导入，昵称自动生成")
+        hint = QLabel("输入卡密激活，激活后卡密将保存到本地")
         hint.setStyleSheet("color: #718096; font-size: 12px;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        # API Key 输入框（单行）
+        # 卡密输入框（单行）
         self._input = QLineEdit()
-        self._input.setPlaceholderText("ck_xxx")
+        self._input.setPlaceholderText("CK_XXXXX_XXXXX_1000")
         self._input.setMinimumHeight(36)
-        self._input.returnPressed.connect(self._do_import)
+        self._input.returnPressed.connect(self._do_redeem)
         layout.addWidget(self._input)
 
         # 状态标签
@@ -86,12 +81,12 @@ class AddAccountDialog(QDialog):
         # 按钮行
         btn_row = QHBoxLayout()
 
-        self._btn_import = QPushButton("🚀 导入")
-        self._btn_import.setObjectName("primary_btn")
-        self._btn_import.setCursor(Qt.PointingHandCursor)
-        self._btn_import.setMinimumHeight(36)
-        self._btn_import.clicked.connect(self._do_import)
-        btn_row.addWidget(self._btn_import)
+        self._btn_redeem = QPushButton("🚀 激活")
+        self._btn_redeem.setObjectName("primary_btn")
+        self._btn_redeem.setCursor(Qt.PointingHandCursor)
+        self._btn_redeem.setMinimumHeight(36)
+        self._btn_redeem.clicked.connect(self._do_redeem)
+        btn_row.addWidget(self._btn_redeem)
 
         btn_cancel = QPushButton(t("common.cancel"))
         btn_cancel.setObjectName("secondary_btn")
@@ -104,302 +99,78 @@ class AddAccountDialog(QDialog):
 
         layout.addLayout(btn_row)
 
-    def _do_import(self):
-        """解析 API Key 并导入"""
-        api_key = self._input.text().strip()
-        if not api_key:
-            QMessageBox.warning(self, t("common.warning"), "请输入 API Key")
+    def _do_redeem(self):
+        """调用服务端激活卡密"""
+        card_key = self._input.text().strip()
+        if not card_key:
+            QMessageBox.warning(self, t("common.warning"), "请输入卡密")
             return
 
-<<<<<<< HEAD
-        # 随机生成昵称
-        nickname = f"账号_{secrets.token_hex(4)}"
-=======
-        self._status_label.setText("⏳ 正在验证 API Key...")
+        self._btn_redeem.setEnabled(False)
+        self._status_label.setText("⏳ 正在激活卡密...")
         self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
 
-        # 用 API Key 查分验证有效性
-        remaining = 0
-        total = 0
-        try:
-            from ...modules.api_client import ApiClient
-            from ...utils.proxy import get_proxy_from_settings
-            _proxy = get_proxy_from_settings()
-            client = ApiClient.from_api_key(api_key, proxy=_proxy)
-            result = client.get_user_resource()
-            if result and result.get("success"):
-                remaining = result.get("remaining_credits", 0)
-                total = result.get("total_credits", 0)
-        except Exception as e:
-            self._status_label.setText(f"⚠️ 验证失败: {e}（仍可保存）")
-            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-        # 填充表单
-        self._token_input.setText(api_key)
-        self._uid_input.setText(uid)
-        self._nickname_input.setText(nickname)
-
-        # 同步导入到上游 Key 池（立即写盘）
-        try:
-            from ...modules.proxy_server import ProxyDatabase
-            proxy_db = ProxyDatabase.get_instance()
-            existing = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-            if api_key not in existing:
-                import secrets as _sec
-                proxy_db.add_upstream_key({
-                    "key_id": f"ck_{_sec.token_hex(4)}",
-                    "api_key": api_key,
-                    "label": uid,
-                    "status": "active",
-                    "points": f"{remaining:.0f}/{total:.0f}" if total > 0 else "",
-                    "points_updated_at": "",
-                    "packages": [],
-                    "created_at": "",
-                })
-                proxy_db._dirty = True
-                proxy_db._flush_to_disk()
-        except Exception:
-            pass
-
-        status = f"✅ API Key 已验证: {nickname} ({uid})"
-        if total > 0:
-            status += f"  积分: {remaining:.0f}/{total:.0f}"
-        status += "\n已填充表单并导入上游Key池，点击「保存」完成"
-        self._status_label.setText(status)
-        self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-
-    def _import_card_keys(self):
-        """粘贴卡密批量导入，格式：昵称----apikey。"""
-        from PySide6.QtWidgets import QDialogButtonBox, QVBoxLayout
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("卡密导入")
-        dialog.setMinimumSize(520, 360)
-        dlg_layout = QVBoxLayout(dialog)
-
-        hint = QLabel("每行一个账号，格式：昵称----apikey")
-        hint.setStyleSheet("color: #9BA4B0; font-size: 12px;")
-        dlg_layout.addWidget(hint)
-
-        text_edit = QTextEdit()
-        text_edit.setPlaceholderText("张三----ck_xxx\n李四----ck_xxx")
-        dlg_layout.addWidget(text_edit, 1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
-        buttons.button(QDialogButtonBox.Ok).setText("导入")
-        buttons.button(QDialogButtonBox.Cancel).setText(t("common.cancel"))
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        dlg_layout.addWidget(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
-            return
-
-        accounts = []
-        invalid = []
-        for line_no, raw_line in enumerate(text_edit.toPlainText().splitlines(), start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            if "----" not in line:
-                invalid.append(str(line_no))
-                continue
-            nickname, api_key = [part.strip() for part in line.split("----", 1)]
-            if not nickname or not api_key:
-                invalid.append(str(line_no))
-                continue
-            accounts.append({
-                "uid": nickname,
-                "nickname": nickname,
-                "auth_token": api_key,
-                "api_key": api_key,
-                "ck": "",
-                "platform": Platform.CODEBUDDY,
-            })
-
-        if not accounts:
-            QMessageBox.warning(self, t("common.warning"), "没有可导入的卡密，请检查格式：昵称----apikey")
-            return
-
-        if invalid:
-            reply = QMessageBox.question(
-                self,
-                "格式提醒",
-                f"有 {len(invalid)} 行格式不正确，将跳过这些行并继续导入吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-        self._on_batch_accounts_imported(accounts)
-        QMessageBox.information(self, "导入完成", f"已导入 {len(accounts)} 个账号")
-
-    def _on_batch_accounts_imported(self, accounts: list):
-        """批量导入回调：保存所有账号并通知刷新，同时自动导入到上游Key池"""
-        if not accounts:
-            self._status_label.setText("⚠️ 没有可导入的账号")
-            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-            return
-
-        key_pool_count = 0
-
-        # 1. 批量导入到上游Key池（一次写磁盘）
-        try:
-            from ...modules.proxy_server import ProxyDatabase
-            proxy_db = ProxyDatabase.get_instance()
-            existing_keys = proxy_db.get_upstream_keys()
-            existing_api_keys = {k.get("api_key", "") for k in existing_keys}
-
-            for acc_data in accounts:
-                api_key = acc_data.get("api_key", "") or acc_data.get("auth_token", "")
-                if api_key and api_key not in existing_api_keys:
-                    # 尝试从导入数据的积分信息初始化 points
-                    points_str = ""
-                    points_updated = ""
-                    remaining = acc_data.get("credits_remaining", 0)
-                    total = acc_data.get("credits_total", 0)
-                    if total > 0:
-                        points_str = f"{remaining:.0f}/{total:.0f}"
-                        points_updated = "imported"
-                    key_data = {
-                        "key_id": f"ck_{secrets.token_hex(4)}",
-                        "api_key": api_key,
-                        "label": acc_data.get("nickname", "") or acc_data.get("uid", ""),
-                        "status": "active",
-                        "used_count": 0,
-                        "points": points_str,
-                        "points_updated_at": points_updated,
-                        "created_at": datetime.now().isoformat(),
-                    }
-                    proxy_db.add_upstream_key(key_data)
-                    existing_api_keys.add(api_key)
-                    key_pool_count += 1
-        except Exception:
-            pass  # Key池导入失败不影响账号导入
-
-        # 2. 保存账号到数据库
-        count = 0
-        last_account = None
-        for acc_data in accounts:
-            account = Account(
-                uid=acc_data.get("uid", ""),
-                nickname=acc_data.get("nickname", ""),
-                platform=acc_data.get("platform", Platform.CODEBUDDY),
-                auth_token=acc_data.get("auth_token", ""),
-                domain=acc_data.get("domain", "www.codebuddy.cn"),
-                ck=acc_data.get("ck", ""),
-                api_key=acc_data.get("api_key", ""),
-            )
-            if acc_data.get("quota"):
-                account.quota = acc_data["quota"]
-            save_account(account)
-            last_account = account
-            count += 1
-
-        if count > 0:
-            msg = f"✅ 已导入 {count} 个账号"
-            if key_pool_count > 0:
-                msg += f"\n🔑 已同步 {key_pool_count} 个 Key 到上游 Key 池"
-            self._status_label.setText(msg)
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-            # 通知父页面 AccountsPage 刷新表格
-            self.account_added.emit(last_account)
-        else:
-            self._status_label.setText("⚠️ 没有可导入的账号")
-            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-    def _login_new(self):
-        """通过 WorkBuddy 浏览器登录新账号"""
         from PySide6.QtCore import QThread, Signal as QSignal
-        from ...modules.oauth import WorkBuddyProcess
+        from ...utils.server_api import redeem
 
-        if WorkBuddyProcess.is_running():
-            reply = QMessageBox.question(
-                self, "需要关闭 WorkBuddy",
-                "登录新账号需要：\n\n"
-                "1. 关闭 WorkBuddy\n"
-                "2. 注销浏览器 SSO 会话\n"
-                "3. 清除所有登录数据\n"
-                "4. 重启 WorkBuddy 让你登录新账号\n\n"
-                "WorkBuddy 关闭后会自动重启，你确定继续吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        class RedeemThread(QThread):
+            done = QSignal(object)  # result dict or None
 
-        self._status_label.setText("⏳ 正在关闭 WorkBuddy 并准备登录...")
-        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-        class LoginThread(QThread):
-            result_ready = QSignal(object)
-            status_update = QSignal(str)
+            def __init__(self, card_key_str):
+                super().__init__()
+                self._card_key = card_key_str
 
             def run(self):
-                result = WorkBuddyAuth.login_new_account(
-                    on_status=lambda s: self.status_update.emit(s),
-                    timeout=300,
-                )
-                self.result_ready.emit(result)
+                try:
+                    result = redeem(self._card_key)
+                    self.done.emit(result)
+                except Exception as e:
+                    self.done.emit({"success": False, "message": str(e)})
 
-        self._login_thread = LoginThread()
-        self._login_thread.result_ready.connect(self._on_login_result)
-        self._login_thread.status_update.connect(self._on_status_update)
-        self._login_thread.start()
+        self._redeem_thread = RedeemThread(card_key)
+        self._redeem_thread.done.connect(self._on_redeem_done)
+        self._redeem_thread.start()
 
-    def _on_status_update(self, status_text: str):
-        """登录流程状态更新"""
-        self._status_label.setText(f"⏳ {status_text}")
-        if "❌" in status_text:
+    def _on_redeem_done(self, result: dict):
+        """激活完成回调"""
+        self._btn_redeem.setEnabled(True)
+
+        if not result:
+            self._status_label.setText("❌ 激活失败：无响应")
             self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-        elif "✅" in status_text:
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-        else:
-            self._status_label.setStyleSheet("color: #2B6CB0; font-size: 12px;")
-
-    def _on_login_result(self, result):
-        """登录结果回调"""
-        if result:
-            self._token_input.setText(result.get("neodata_token", "") or result.get("access_token", ""))
-            self._uid_input.setText(result.get("uid", ""))
-            self._nickname_input.setText(result.get("nickname", ""))
-            self._status_label.setText(f"✅ 登录成功: {result.get('nickname', '新账号')}")
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-        else:
-            self._status_label.setText("❌ 登录超时或失败，请重试")
-            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-
-    def _save(self):
-        """保存账号"""
-        if not self._token_input.text() and not self._uid_input.text():
-            QMessageBox.warning(self, t("common.warning"), "请先提取或登录账号")
             return
 
-        token = self._token_input.text()
-        # 如果 token 以 ck_ 开头，说明是 API Key，同时填到 api_key 字段
-        api_key = token if token.startswith("ck_") else ""
->>>>>>> origin/main
+        success = result.get("success", False) or result.get("code") == 0
+        if not success:
+            msg = result.get("message") or result.get("msg") or "未知错误"
+            self._status_label.setText(f"❌ 激活失败：{msg}")
+            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
+            return
 
-        # 1. 保存账号到数据库
+        # 激活成功，获取 userKey
+        user_key = result.get("userKey") or result.get("user_key") or ""
+        card_key = self._input.text().strip()
+        nickname = f"卡密_{secrets.token_hex(4)}"
+
+        # 保存到本地数据库
         account = Account(
-            uid=nickname,
+            uid=card_key,
             nickname=nickname,
             platform=Platform.CODEBUDDY,
-            auth_token=api_key,
+            auth_token=user_key or card_key,
             domain="www.codebuddy.cn",
-            ck="",
-            api_key=api_key,
+            ck=card_key,
+            api_key=user_key or card_key,
         )
         save_account(account)
 
-        # 2. 同步上游 Key 池
-        key_pool_added = False
+        # 同步上游 Key 池
         try:
             from ...modules.proxy_server import ProxyDatabase
             proxy_db = ProxyDatabase.get_instance()
             existing_api_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-            if api_key not in existing_api_keys:
+            api_key = user_key or card_key
+            if api_key and api_key not in existing_api_keys:
                 proxy_db.add_upstream_key({
                     "key_id": f"ck_{secrets.token_hex(4)}",
                     "api_key": api_key,
@@ -410,82 +181,17 @@ class AddAccountDialog(QDialog):
                     "points_updated_at": "",
                     "created_at": datetime.now().isoformat(),
                 })
-                key_pool_added = True
         except Exception:
             pass
 
-        # 3. 通知刷新
+        # 通知刷新
         self.account_added.emit(account)
 
-        # 4. 查询积分
-        self._btn_import.setEnabled(False)
-        self._status_label.setText("⏳ 正在查询积分...")
-        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-        from PySide6.QtCore import QThread, Signal as QSignal
-
-        class QuotaQueryThread(QThread):
-            done = QSignal(object, object)  # (account, result_dict)
-
-            def __init__(self, acc):
-                super().__init__()
-                self._acc = acc
-
-            def run(self):
-                try:
-                    client = ApiClient.from_api_key(self._acc.api_key)
-                    result = client.get_user_resource()
-                except Exception as e:
-                    result = {"success": False, "error": str(e)}
-                self.done.emit(self._acc, result)
-
-        self._query_thread = QuotaQueryThread(account)
-        self._query_thread.done.connect(
-            lambda acc, result: self._on_quota_done(acc, result, key_pool_added)
-        )
-        self._query_thread.start()
-
-    def _on_quota_done(self, account: Account, result: dict, key_pool_added: bool):
-        """积分查询完成"""
-        self._btn_import.setEnabled(True)
-
-        if result.get("success"):
-            remaining = result.get("remaining_credits", 0)
-            total = result.get("total_credits", 0)
-            packages = result.get("packages", [])
-
-            account.quota.credits_remaining = remaining
-            account.quota.credits_total = total
-            account.quota.packages = packages
-            account.quota.last_updated = datetime.now()
-            save_account(account)
-
-            # 同步上游 Key 池积分
-            try:
-                from ...modules.proxy_server import ProxyDatabase
-                db = ProxyDatabase.get_instance()
-                db.sync_quota_to_key(
-                    api_key_or_token=account.api_key or account.auth_token,
-                    remaining_credits=remaining,
-                    total_credits=total,
-                    packages=packages,
-                )
-            except Exception:
-                pass
-
-            msg = f"✅ 已导入: {account.nickname}"
-            if key_pool_added:
-                msg += "\n🔑 已同步到上游 Key 池"
-            msg += f"\n💎 积分: {remaining:.0f}/{total:.0f}"
-            self._status_label.setText(msg)
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-        else:
-            msg = f"✅ 已导入: {account.nickname}"
-            if key_pool_added:
-                msg += "\n🔑 已同步到上游 Key 池"
-            msg += f"\n⚠️ 积分查询失败: {result.get('error', '未知')}"
-            self._status_label.setText(msg)
-            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+        msg = f"✅ 激活成功: {nickname}"
+        if user_key:
+            msg += f"\n🔑 userKey: {user_key[:20]}..."
+        self._status_label.setText(msg)
+        self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
 
         # 完成
         self.accept()
@@ -646,6 +352,10 @@ class AccountsPage(QWidget):
         self._current_page = 0
         self._sort_column = None
         self._sort_order = Qt.AscendingOrder
+        self._usage_range = "today"  # 使用情况时间范围: today/7d/30d/all
+        self._colors = _current_theme_colors()
+        self._scale = 1.0
+        self._all_usage_cards = []
         self._setup_ui()
 
     def _setup_ui(self):
@@ -658,87 +368,147 @@ class AccountsPage(QWidget):
         title.setObjectName("page_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("管理所有平台的账号 · 双击行查看积分明细 · 右键更多操作")
+        subtitle = QLabel("积分额度与消耗明细")
         subtitle.setObjectName("page_subtitle")
         layout.addWidget(subtitle)
 
-        # 工具栏
+        # 内容区域
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(32, 0, 32, 32)
         content_layout.setSpacing(16)
-        toolbar = QHBoxLayout()
 
-        toolbar.addStretch()
-
-        # 批量删除按钮
-        self._btn_batch_del = QPushButton("🗑️ 批量删除")
-        self._btn_batch_del.setObjectName("danger_btn")
-        self._btn_batch_del.setCursor(Qt.PointingHandCursor)
-        self._btn_batch_del.clicked.connect(self._batch_delete)
+        # 隐藏控件（保留引用避免报错）
+        self._btn_batch_del = QPushButton()
         self._btn_batch_del.setVisible(False)
-        toolbar.addWidget(self._btn_batch_del)
-
-        self._btn_batch_export = QPushButton("批量导出")
-        self._btn_batch_export.setObjectName("secondary_btn")
-        self._btn_batch_export.setCursor(Qt.PointingHandCursor)
-        self._btn_batch_export.clicked.connect(self._export_selected_accounts)
+        self._btn_batch_export = QPushButton()
         self._btn_batch_export.setVisible(False)
-        toolbar.addWidget(self._btn_batch_export)
-
-        # 操作按钮
-        btn_add = QPushButton(f"➕ {t('accounts.add_account')}")
-        btn_add.setObjectName("primary_btn")
-        btn_add.setCursor(Qt.PointingHandCursor)
-        btn_add.clicked.connect(self._add_account)
-        toolbar.addWidget(btn_add)
-
-        # 查询全部积分按钮
-        self._btn_query_all = QPushButton("💎 查询全部积分")
-        self._btn_query_all.setObjectName("primary_btn")
-        self._btn_query_all.setCursor(Qt.PointingHandCursor)
-        self._btn_query_all.clicked.connect(self._query_all_quotas)
-        toolbar.addWidget(self._btn_query_all)
-
-        # 检查账号状态按钮（保留引用但不显示）
-        self._btn_check_status = QPushButton("🔍 检查账号状态")
-        self._btn_check_status.setObjectName("secondary_btn")
+        self._btn_query_all = QPushButton()
+        self._btn_query_all.setVisible(False)
+        self._btn_check_status = QPushButton()
         self._btn_check_status.setVisible(False)
-
-        # 停止按钮
-        self._btn_stop_query = QPushButton("⏹ 停止")
-        self._btn_stop_query.setObjectName("secondary_btn")
-        self._btn_stop_query.setStyleSheet(
-            "QPushButton { color: #FC8181; border: 1px solid #FC8181; }"
-            "QPushButton:hover { background-color: rgba(229,62,62,0.1); }"
-        )
-        self._btn_stop_query.setCursor(Qt.PointingHandCursor)
+        self._btn_stop_query = QPushButton()
         self._btn_stop_query.setVisible(False)
-        self._btn_stop_query.clicked.connect(self._stop_query)
-        toolbar.addWidget(self._btn_stop_query)
+        # 积分进度条隐藏控件（保留引用，逻辑中会更新）
+        self._quota_value_label = QLabel("--")
+        self._quota_packages_label = QLabel("")
+        self._quota_badge_label = QLabel("--")
+        self._quota_progress = QProgressBar()
+        self._quota_progress.setVisible(False)
 
-        content_layout.addLayout(toolbar)
+        # === 使用情况图表区域 ===
+        self._usage_title = QLabel("📊 使用情况")
+        self._usage_title.setStyleSheet(
+            f"font-size: 16px; font-weight: 600; margin-top: 8px; color: {self._colors['text_primary']};"
+        )
+        content_layout.addWidget(self._usage_title)
 
-        # 表格 – 列：昵称、UID、积分、TK、API状态
-        self._table = QTableWidget()
-        self._table.setColumnCount(5)
-        self._table.setHorizontalHeaderLabels([
-            "昵称", "UID", "积分", "TK", "API状态"
-        ])
-        header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Stretch)
-        header.setSectionsClickable(True)
-        header.setSortIndicatorShown(True)
-        header.sectionClicked.connect(self._on_header_sort)
-        self._table.setAlternatingRowColors(True)
-        self._table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._table.customContextMenuRequested.connect(self._show_context_menu)
-        self._table.itemSelectionChanged.connect(self._on_selection_changed)
-        self._table.doubleClicked.connect(self._on_table_double_click)
-        content_layout.addWidget(self._table, 1)
+        # 时间范围切换按钮
+        range_layout = QHBoxLayout()
+        range_layout.setSpacing(8)
+
+        self._range_btn_group = QButtonGroup(self)
+        self._range_btn_group.setExclusive(True)
+
+        range_configs = [
+            ("today", "今日"),
+            ("7d", "近7天"),
+            ("30d", "近30天"),
+            ("all", "总计"),
+        ]
+        self._range_buttons = []
+        for key, label_text in range_configs:
+            btn = QPushButton(label_text)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("range_key", key)
+            if key == self._usage_range:
+                btn.setChecked(True)
+                btn.setStyleSheet(self._range_btn_style_active())
+            else:
+                btn.setStyleSheet(self._range_btn_style_normal())
+            self._range_btn_group.addButton(btn)
+            self._range_buttons.append(btn)
+            range_layout.addWidget(btn)
+
+        range_layout.addStretch()
+        content_layout.addLayout(range_layout)
+
+        self._range_btn_group.buttonClicked.connect(self._on_range_changed)
+
+        # 使用情况统计卡片（5个）
+        self._usage_grid = QGridLayout()
+        self._usage_grid.setSpacing(16)
+
+        self._usage_card_credits = StatCard("消耗积分", "--", "💰", "warning")
+        self._usage_card_prompt = StatCard("输入", "--", "⬆️", "accent")
+        self._usage_card_completion = StatCard("输出", "--", "⬇️", "success")
+        self._usage_card_total = StatCard("总Token", "--", "🔢", "accent")
+        self._usage_card_count = StatCard("请求数量", "--", "📈", "accent")
+
+        self._usage_grid.addWidget(self._usage_card_credits, 0, 0)
+        self._usage_grid.addWidget(self._usage_card_prompt, 0, 1)
+        self._usage_grid.addWidget(self._usage_card_completion, 0, 2)
+        self._usage_grid.addWidget(self._usage_card_total, 0, 3)
+        self._usage_grid.addWidget(self._usage_card_count, 0, 4)
+
+        content_layout.addLayout(self._usage_grid)
+        self._all_usage_cards = [
+            self._usage_card_credits, self._usage_card_prompt, self._usage_card_completion,
+            self._usage_card_total, self._usage_card_count,
+        ]
+
+        # 缓存命中率图表区域
+        self._cache_frame = QFrame()
+        self._apply_cache_frame_style()
+        cache_layout = QHBoxLayout(self._cache_frame)
+        cache_layout.setContentsMargins(20, 16, 20, 16)
+        cache_layout.setSpacing(20)
+
+        # 环形图
+        self._cache_chart = CacheHitRateChart()
+
+        # 右侧：标题 + 命中详情
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setSpacing(12)
+
+        self._cache_title = QLabel("命中率统计")
+        self._cache_title.setStyleSheet(
+            f"font-size: 14px; font-weight: 600; color: {self._colors['text_primary']};"
+        )
+        right_layout.addWidget(self._cache_title)
+
+        # 6 项命中指标（3行 x 2列）
+        self._legend_labels = {}
+        self._legend_values = {}
+        legend_grid = QGridLayout()
+        legend_grid.setSpacing(8)
+
+        legend_items = [
+            ("input_hit", "输入命中", "success"),
+            ("input_rate", "输入命中率", "success"),
+            ("output_hit", "输出命中", "text_tertiary"),
+            ("output_rate", "输出命中率", "text_tertiary"),
+            ("total_hit", "总命中", "accent"),
+            ("total_rate", "总命中率", "accent"),
+        ]
+        for idx, (key, label_text, color_key) in enumerate(legend_items):
+            row = idx // 2
+            col = idx % 2
+            label = QLabel()
+            label.setTextFormat(Qt.TextFormat.RichText)
+            legend_grid.addWidget(label, row, col)
+            self._legend_labels[key] = (label, color_key, label_text)
+            self._legend_values[key] = "--"
+            self._render_legend(key)
+
+        right_layout.addLayout(legend_grid)
+        right_layout.addStretch()
+
+        cache_layout.addWidget(self._cache_chart)
+        cache_layout.addWidget(right_panel, 1)
+        content_layout.addWidget(self._cache_frame)
 
         # === 消耗明细 ===
         usage_card = QFrame()
@@ -762,16 +532,17 @@ class AccountsPage(QWidget):
         usage_layout.addWidget(usage_subtitle)
 
         self._usage_table = QTableWidget()
-        self._usage_table.setColumnCount(5)
+        self._usage_table.setColumnCount(6)
         self._usage_table.setHorizontalHeaderLabels([
-            "时间", "模型", "请求Token", "响应Token", "总Token"
+            "时间", "模型", "请求Token", "响应Token", "总Token", "扣除积分"
         ])
         usage_header_obj = self._usage_table.horizontalHeader()
         usage_header_obj.setSectionResizeMode(QHeaderView.Stretch)
         self._usage_table.setAlternatingRowColors(True)
         self._usage_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._usage_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._usage_table.setMaximumHeight(280)
+        # 至少展示10行（表头 + 10行数据）
+        self._usage_table.setMinimumHeight(10 * 30 + 30)
         usage_layout.addWidget(self._usage_table)
 
         # 消耗明细翻页栏
@@ -804,463 +575,171 @@ class AccountsPage(QWidget):
 
         content_layout.addWidget(usage_card)
 
-        # 进度条
+        # 进度条和日志（隐藏控件，保留引用避免报错）
         self._progress_bar = QProgressBar()
         self._progress_bar.setVisible(False)
-        content_layout.addWidget(self._progress_bar)
-
-        # 查询日志
         self._log_edit = QTextEdit()
-        self._log_edit.setObjectName("log_edit")
-        self._log_edit.setReadOnly(True)
-        self._log_edit.setMaximumHeight(120)
         self._log_edit.setVisible(False)
-        content_layout.addWidget(self._log_edit)
 
-        # === IP 代理配置 ===
-        proxy_panel = self._build_proxy_config_ui()
-        content_layout.addWidget(proxy_panel)
+        # 用滚动区域包裹内容，确保表格不被压缩
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        content_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
 
-        # 整体可滚动 — 避免代理面板展开时把表格挤出可视范围
-        # viewport 必须显式 setAutoFillBackground + QPalette + QSS 三管齐下
-        # 否则深色模式下会显示系统默认浅色
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setWidget(content)
-        self._scroll.setFrameShape(QScrollArea.NoFrame)
-        self._apply_scroll_background()
-        layout.addWidget(self._scroll, 1)
+    def _load_accounts(self):
+        self._accounts = load_accounts()
 
-    # === IP 代理配置 ===
+    def _apply_filter(self):
+        filtered = self._accounts
 
-    def _build_proxy_config_ui(self) -> QFrame:
-        """构建 IP 代理配置面板"""
-        frame = QFrame()
-        frame.setObjectName("proxy_config_frame")
-        frame.setFrameShape(QFrame.StyledPanel)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(10)
+        self._filtered_accounts = filtered
+        self._apply_sort()
 
-        # 标题行 + 启用勾选
-        header_row = QHBoxLayout()
-        self._proxy_enabled_cb = QCheckBox("🔒 IP 代理")
-        self._proxy_enabled_cb.setStyleSheet("font-size: 14px; font-weight: 600;")
-        self._proxy_enabled_cb.toggled.connect(self._on_proxy_toggle)
-        header_row.addWidget(self._proxy_enabled_cb)
-        header_row.addStretch()
-        layout.addLayout(header_row)
+    def _account_sort_value(self, account: Account, column: int):
+        if column == 0:
+            return account.quota.credits_remaining
+        if column == 1:
+            return account.auth_token.lower()
+        if column == 2:
+            return (
+                0 if account.status == AccountStatus.ACTIVE else 1,
+                0 if account.api_key else 1,
+                account.status.value,
+            )
+        return ""
 
-        # 说明文字
-        hint = QLabel("启用后，签到 / 查分 / 状态检查等操作将通过代理执行，API 转发服务不受影响")
-        hint.setStyleSheet("color: #718096; font-size: 12px;")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        # 配置区（可折叠）
-        self._proxy_config_widget = QWidget()
-        config_layout = QVBoxLayout(self._proxy_config_widget)
-        config_layout.setSpacing(8)
-
-        # 模式选择 + 协议
-        row0 = QHBoxLayout()
-        row0.addWidget(QLabel("模式:"))
-        self._proxy_mode_combo = QComboBox()
-        self._proxy_mode_combo.addItem("API", "api")
-        self._proxy_mode_combo.addItem("滚动IP", "rolling")
-        self._proxy_mode_combo.addItem("手动", "static")
-        self._proxy_mode_combo.setFixedWidth(80)
-        self._proxy_mode_combo.currentIndexChanged.connect(self._on_proxy_mode_changed)
-        row0.addWidget(self._proxy_mode_combo)
-
-        row0.addWidget(QLabel("协议:"))
-        self._proxy_protocol_combo = QComboBox()
-        self._proxy_protocol_combo.addItems(["HTTP", "SOCKS5"])
-        self._proxy_protocol_combo.setFixedWidth(90)
-        row0.addWidget(self._proxy_protocol_combo)
-        row0.addStretch()
-        config_layout.addLayout(row0)
-
-        # 用 QStackedWidget 切换 API 模式 / 手动模式
-        self._proxy_mode_stack = QStackedWidget()
-
-        # --- API 提取模式 ---
-        api_widget = QWidget()
-        api_layout = QVBoxLayout(api_widget)
-        api_layout.setContentsMargins(0, 0, 0, 0)
-        api_layout.setSpacing(4)
-        api_label = QLabel("代理 API 地址（返回 ip:port 格式）:")
-        api_label.setStyleSheet("font-size: 12px; color: #718096;")
-        api_layout.addWidget(api_label)
-        self._proxy_api_input = QLineEdit()
-        self._proxy_api_input.setPlaceholderText("http://api.example.com/getip?secret=xxx&format=txt&split=3")
-        # 离开输入框时自动保存，避免重启丢失
-        self._proxy_api_input.editingFinished.connect(self._save_proxy_settings)
-        api_layout.addWidget(self._proxy_api_input)
-        self._proxy_mode_stack.addWidget(api_widget)
-
-        # --- 滚动IP模式（rola.vip 风格）— 只保留刷新URL ---
-        rolling_widget = QWidget()
-        rolling_layout = QVBoxLayout(rolling_widget)
-        rolling_layout.setContentsMargins(0, 0, 0, 0)
-        rolling_layout.setSpacing(4)
-
-        rolling_label = QLabel("刷新URL（{user} 会替换为下方用户名）:")
-        rolling_label.setStyleSheet("font-size: 12px; color: #718096;")
-        rolling_layout.addWidget(rolling_label)
-        self._proxy_roll_refresh_input = QLineEdit()
-        self._proxy_roll_refresh_input.setPlaceholderText("https://refresh.rola.vip/refresh?user={user}")
-        self._proxy_roll_refresh_input.setMinimumHeight(34)
-        self._proxy_roll_refresh_input.editingFinished.connect(self._save_proxy_settings)
-        rolling_layout.addWidget(self._proxy_roll_refresh_input)
-
-        rolling_hint = QLabel("💡 协议固定 SOCKS5h，地址/端口/账号/密码在下方统一填写")
-        rolling_hint.setStyleSheet("font-size: 11px; color: #718096;")
-        rolling_layout.addWidget(rolling_hint)
-
-        self._proxy_mode_stack.addWidget(rolling_widget)
-
-        # --- 手动输入模式（占位，地址/端口在下方公共区） ---
-        static_widget = QWidget()
-        static_layout = QVBoxLayout(static_widget)
-        static_layout.setContentsMargins(0, 0, 0, 0)
-        static_hint = QLabel("在下方填写代理地址和端口")
-        static_hint.setStyleSheet("font-size: 12px; color: #718096;")
-        static_layout.addWidget(static_hint)
-        self._proxy_mode_stack.addWidget(static_widget)
-
-        config_layout.addWidget(self._proxy_mode_stack)
-
-        # --- 公共：地址 + 端口（滚动IP / 手动模式共用，API模式隐藏） ---
-        self._proxy_host_port_widget = QWidget()
-        hp_layout = QHBoxLayout(self._proxy_host_port_widget)
-        hp_layout.setContentsMargins(0, 0, 0, 0)
-        hp_layout.setSpacing(8)
-        hp_layout.addWidget(QLabel("地址:"))
-        self._proxy_host_input = QLineEdit()
-        self._proxy_host_input.setPlaceholderText("代理服务器 IP 或域名")
-        self._proxy_host_input.editingFinished.connect(self._save_proxy_settings)
-        hp_layout.addWidget(self._proxy_host_input, 1)
-        hp_layout.addWidget(QLabel("端口:"))
-        self._proxy_port_input = QLineEdit()
-        self._proxy_port_input.setPlaceholderText("1080")
-        self._proxy_port_input.editingFinished.connect(self._save_proxy_settings)
-        self._proxy_port_input.setFixedWidth(70)
-        hp_layout.addWidget(self._proxy_port_input)
-        config_layout.addWidget(self._proxy_host_port_widget)
-
-        # 认证（可选）
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("用户名:"))
-        self._proxy_username_input = QLineEdit()
-        self._proxy_username_input.setPlaceholderText("可选")
-        self._proxy_username_input.editingFinished.connect(self._save_proxy_settings)
-        row2.addWidget(self._proxy_username_input, 1)
-
-        row2.addWidget(QLabel("密码:"))
-        self._proxy_password_input = QLineEdit()
-        self._proxy_password_input.setPlaceholderText("可选")
-        self._proxy_password_input.setEchoMode(QLineEdit.Password)
-        self._proxy_password_input.editingFinished.connect(self._save_proxy_settings)
-        row2.addWidget(self._proxy_password_input, 1)
-        config_layout.addLayout(row2)
-
-        # 超时 + 按钮
-        row3 = QHBoxLayout()
-        row3.addWidget(QLabel("超时:"))
-        self._proxy_timeout_spin = QSpinBox()
-        self._proxy_timeout_spin.setRange(5, 60)
-        self._proxy_timeout_spin.setValue(10)
-        self._proxy_timeout_spin.setSuffix(" 秒")
-        self._proxy_timeout_spin.setFixedWidth(100)
-        row3.addWidget(self._proxy_timeout_spin)
-
-        row3.addStretch()
-
-        self._proxy_test_btn = QPushButton("🔌 测试连接")
-        self._proxy_test_btn.setObjectName("secondary_btn")
-        self._proxy_test_btn.setCursor(Qt.PointingHandCursor)
-        self._proxy_test_btn.clicked.connect(self._test_proxy)
-        row3.addWidget(self._proxy_test_btn)
-
-        self._proxy_save_btn = QPushButton("💾 保存配置")
-        self._proxy_save_btn.setObjectName("primary_btn")
-        self._proxy_save_btn.setCursor(Qt.PointingHandCursor)
-        self._proxy_save_btn.clicked.connect(self._save_proxy_settings)
-        row3.addWidget(self._proxy_save_btn)
-        config_layout.addLayout(row3)
-
-        layout.addWidget(self._proxy_config_widget)
-
-        # 初始折叠
-        self._proxy_config_widget.setVisible(False)
-
-        # 加载已保存的配置
-        self._load_proxy_settings()
-
-        return frame
-
-    def _on_proxy_toggle(self, checked: bool):
-        """启用/禁用代理时展开/折叠配置区"""
-        self._proxy_config_widget.setVisible(checked)
-
-    def _on_proxy_mode_changed(self):
-        """切换 API 提取 / 滚动IP / 手动模式"""
-        mode = self._proxy_mode_combo.currentData()
-        idx = self._proxy_mode_combo.currentIndex()
-        self._proxy_mode_stack.setCurrentIndex(idx)
-        # API 模式不需要地址/端口，隐藏；滚动IP 和 手动模式需要，显示
-        if hasattr(self, "_proxy_host_port_widget"):
-            self._proxy_host_port_widget.setVisible(mode != "api")
-        # 滚动IP 模式协议固定 SOCKS5，自动切换并锁定
-        if mode == "rolling":
-            idx5 = self._proxy_protocol_combo.findText("SOCKS5")
-            if idx5 >= 0:
-                self._proxy_protocol_combo.setCurrentIndex(idx5)
-            self._proxy_protocol_combo.setEnabled(False)
-        else:
-            self._proxy_protocol_combo.setEnabled(True)
-
-    def _load_proxy_settings(self):
-        """从设置加载代理配置到 UI"""
-        enabled = load_setting("proxy_enabled", "false") == "true"
-        self._proxy_enabled_cb.setChecked(enabled)
-
-        protocol = load_setting("proxy_protocol", "HTTP")
-        idx = self._proxy_protocol_combo.findText(protocol, Qt.MatchFixedString)
-        if idx >= 0:
-            self._proxy_protocol_combo.setCurrentIndex(idx)
-
-        mode = load_setting("proxy_mode", "api")
-        mode_idx = self._proxy_mode_combo.findData(mode)
-        if mode_idx >= 0:
-            self._proxy_mode_combo.setCurrentIndex(mode_idx)
-            self._proxy_mode_stack.setCurrentIndex(mode_idx)
-
-        self._proxy_api_input.setText(load_setting("proxy_api_url", ""))
-        self._proxy_host_input.setText(load_setting("proxy_host", ""))
-        self._proxy_port_input.setText(load_setting("proxy_port", ""))
-        self._proxy_username_input.setText(load_setting("proxy_username", ""))
-        self._proxy_password_input.setText(load_setting("proxy_password", ""))
-        # 滚动IP模式刷新URL
-        if hasattr(self, "_proxy_roll_refresh_input"):
-            self._proxy_roll_refresh_input.setText(load_setting("proxy_refresh_url", ""))
-        self._proxy_timeout_spin.setValue(int(load_setting("proxy_timeout", "10")))
-        # 触发一次模式切换，更新地址/端口可见性 + 协议锁定
-        self._on_proxy_mode_changed()
-
-    def _save_proxy_settings(self):
-        """保存代理配置到设置（静默，自动保存和手动保存都不弹窗）"""
-        save_setting("proxy_enabled", "true" if self._proxy_enabled_cb.isChecked() else "false")
-        save_setting("proxy_protocol", self._proxy_protocol_combo.currentText())
-        mode = self._proxy_mode_combo.currentData()
-        save_setting("proxy_mode", mode)
-        save_setting("proxy_api_url", self._proxy_api_input.text().strip())
-        save_setting("proxy_host", self._proxy_host_input.text().strip())
-        save_setting("proxy_port", self._proxy_port_input.text().strip())
-        save_setting("proxy_username", self._proxy_username_input.text().strip())
-        save_setting("proxy_password", self._proxy_password_input.text())
-        # 滚动IP模式刷新URL
-        if hasattr(self, "_proxy_roll_refresh_input"):
-            save_setting("proxy_refresh_url", self._proxy_roll_refresh_input.text().strip())
-        save_setting("proxy_timeout", str(self._proxy_timeout_spin.value()))
-
-        # 清除代理缓存
-        from ...utils.proxy import invalidate_proxy_cache
-        invalidate_proxy_cache()
-
-        # 如果启用 SOCKS，检测 PySocks（依赖缺失必须弹窗提示）
-        if self._proxy_enabled_cb.isChecked():
-            protocol = self._proxy_protocol_combo.currentText().upper()
-            if protocol == "SOCKS5":
-                try:
-                    import socks  # noqa: F401
-                except ImportError:
-                    QMessageBox.warning(self, "依赖缺失",
-                        "SOCKS5 代理需要安装 PySocks 包：\n\npip install PySocks\n\n"
-                        "未安装时 SOCKS5 代理将无法使用。")
-                    return
-
-    def _test_proxy(self):
-        """测试代理连通性"""
-        from ...utils.proxy import (
-            build_proxy_url, test_proxy_connection,
-            fetch_proxy_from_api, invalidate_proxy_cache,
+    def _apply_sort(self):
+        if self._sort_column is None:
+            return
+        reverse = self._sort_order == Qt.DescendingOrder
+        self._filtered_accounts.sort(
+            key=lambda account: self._account_sort_value(account, self._sort_column),
+            reverse=reverse,
         )
 
-        # 先保存配置（避免用户只测试不保存，重启后丢失）
-        self._save_proxy_settings()
+    # === 使用情况图表相关方法 ===
 
-        protocol = self._proxy_protocol_combo.currentText().lower()
-        mode = self._proxy_mode_combo.currentData()
-        username = self._proxy_username_input.text().strip()
-        password = self._proxy_password_input.text()
-        timeout = self._proxy_timeout_spin.value()
+    @staticmethod
+    def _format_token_count(value: int) -> str:
+        """将 Token/数字按大小格式化为中文单位，保留 2 位小数"""
+        v = float(value)
+        if v < 10_000:
+            return f"{int(v):,}"
+        if v < 1_000_000:
+            return f"{v / 10_000:.2f}万"
+        if v < 100_000_000:
+            return f"{v / 1_000_000:.2f}百万"
+        return f"{v / 100_000_000:.2f}亿"
 
-        # SOCKS 依赖检测
-        if protocol in ("socks4", "socks5"):
-            try:
-                import socks  # noqa: F401
-            except ImportError:
-                QMessageBox.warning(self, "依赖缺失",
-                    "SOCKS 代理需要安装 PySocks 包：\n\npip install PySocks")
-                return
+    def _range_btn_style_active(self) -> str:
+        """选中状态按钮样式（跟随缩放）"""
+        c = self._colors
+        s = self._scale
+        pad_v = int(6 * s)
+        pad_h = int(16 * s)
+        font_size = int(13 * s)
+        return (
+            f"QPushButton {{ background-color: {c['accent']}; color: #FFFFFF; "
+            f"border: none; padding: {pad_v}px {pad_h}px; border-radius: 6px; font-size: {font_size}px; }}"
+        )
 
-        if mode == "rolling":
-            # 滚动IP模式：先调刷新URL换IP，再测连接
-            host = self._proxy_host_input.text().strip()
-            port = self._proxy_port_input.text().strip()
-            roll_user = username   # 共用公共用户名
-            roll_pass = password   # 共用公共密码
-            refresh_url = self._proxy_roll_refresh_input.text().strip()
+    def _range_btn_style_normal(self) -> str:
+        """未选中状态按钮样式（跟随缩放）"""
+        c = self._colors
+        s = self._scale
+        pad_v = int(6 * s)
+        pad_h = int(16 * s)
+        font_size = int(13 * s)
+        return (
+            f"QPushButton {{ background-color: {c['bg_tertiary']}; color: {c['text_secondary']}; "
+            f"border: none; padding: {pad_v}px {pad_h}px; border-radius: 6px; font-size: {font_size}px; }}"
+            f"QPushButton:hover {{ background-color: {c['bg_hover']}; }}"
+        )
 
-            if not host or not port or not roll_user or not refresh_url:
-                QMessageBox.warning(self, "配置不完整", "请填写地址/端口/用户名/刷新URL")
-                return
+    def _apply_cache_frame_style(self):
+        """缓存命中率图表区域样式"""
+        c = self._colors
+        self._cache_frame.setStyleSheet(
+            f"QFrame {{ background-color: {c['bg_secondary']}; "
+            f"border: 1px solid {c['border']}; border-radius: 8px; }}"
+        )
 
-            # PySocks 检测
-            try:
-                import socks  # noqa: F401
-            except ImportError:
-                QMessageBox.warning(self, "依赖缺失",
-                    "滚动IP模式使用 SOCKS5h，需要 PySocks：\n\npip install PySocks")
-                return
+    def _render_legend(self, key: str):
+        """渲染单项图例（富文本：彩色圆点 + 标签 + 值，字号跟随缩放）"""
+        if key not in self._legend_labels:
+            return
+        label, color_key, label_text = self._legend_labels[key]
+        value = self._legend_values.get(key, "--")
+        color_val = self._colors.get(color_key, self._colors["accent"])
+        text_col = self._colors["text_secondary"]
+        font_size = int(13 * self._scale)
+        label.setText(
+            f'<span style="color:{color_val}; font-size:{font_size}px;">●</span> '
+            f'<span style="color:{text_col}; font-size:{font_size}px;">{label_text}  {value}</span>'
+        )
 
-            self._proxy_test_btn.setEnabled(False)
-            self._proxy_test_btn.setText("⏳ 换IP中...")
+    def _update_legend(self, key: str, value: str):
+        """更新单项图例的数值"""
+        if key in self._legend_labels:
+            self._legend_values[key] = value
+            self._render_legend(key)
 
-            from PySide6.QtCore import QThread, Signal as QSignal
-            from ...utils.proxy import fetch_rolling_proxy, test_proxy_connection
+    def _on_range_changed(self, btn):
+        """时间范围切换回调"""
+        key = btn.property("range_key")
+        if key and key != self._usage_range:
+            self._usage_range = key
+            for b in self._range_buttons:
+                if b.isChecked():
+                    b.setStyleSheet(self._range_btn_style_active())
+                else:
+                    b.setStyleSheet(self._range_btn_style_normal())
+            self._refresh_usage()
 
-            class ProxyRollingTestWorker(QThread):
-                done = QSignal(dict)
+    def _refresh_usage(self):
+        """刷新使用情况数据"""
+        from ...modules.proxy_server import ProxyDatabase
+        db = ProxyDatabase.get_instance()
+        days_map = {"today": 1, "7d": 7, "30d": 30, "all": None}
+        days = days_map.get(self._usage_range, 1)
+        summary = db.get_usage_summary(days=days)
 
-                def __init__(self, h, p, u, pw, ru, tout):
-                    super().__init__()
-                    self._host = h
-                    self._port = p
-                    self._user = u
-                    self._pass = pw
-                    self._refresh_url = ru
-                    self._timeout = tout
+        # 更新5个统计卡片
+        prompt = summary["prompt_tokens"]
+        completion = summary["completion_tokens"]
+        total_tokens = prompt + completion
+        cached = summary["cached_tokens"]
 
-                def run(self):
-                    # 1. 调刷新URL换IP
-                    roll_result = fetch_rolling_proxy(
-                        host=self._host, port=self._port,
-                        username=self._user, password=self._pass,
-                        refresh_url_template=self._refresh_url,
-                        wait_seconds=3.0, timeout=self._timeout,
-                    )
-                    if not roll_result["success"]:
-                        self.done.emit({"success": False, "error": roll_result["error"], "ip": "", "latency_ms": 0})
-                        return
-                    # 2. 测代理连通性
-                    test_result = test_proxy_connection(roll_result["proxy_url"], timeout=self._timeout)
-                    test_result["fetched_ip"] = f"{self._host}:{self._port} (滚动IP)"
-                    self.done.emit(test_result)
+        self._usage_card_credits.set_value(f"{summary['credits']:,.2f}")
+        self._usage_card_prompt.set_value(self._format_token_count(prompt))
+        self._usage_card_completion.set_value(self._format_token_count(completion))
+        self._usage_card_total.set_value(self._format_token_count(total_tokens))
+        self._usage_card_count.set_value(self._format_token_count(summary["count"]))
 
-            self._proxy_test_worker = ProxyRollingTestWorker(host, port, roll_user, roll_pass, refresh_url, timeout)
-            self._proxy_test_worker.done.connect(self._on_proxy_test_done)
-            self._proxy_test_worker.start()
+        # 计算各项命中率
+        input_hit = cached
+        input_rate = cached / prompt if prompt > 0 else 0.0
+        output_hit = 0  # 输出无缓存命中机制
+        output_rate = 0.0
+        total_hit = cached  # 输入命中 + 输出命中(0)
+        total_rate = cached / total_tokens if total_tokens > 0 else 0.0
 
-        elif mode == "api":
-            # API 提取模式：先调 API 拿 ip:port，再测连接
-            api_url = self._proxy_api_input.text().strip()
-            if not api_url:
-                QMessageBox.warning(self, "配置不完整", "请填写代理 API 地址")
-                return
+        # 更新环形图（中心显示总命中率）
+        self._cache_chart.set_rate(total_rate)
 
-            self._proxy_test_btn.setEnabled(False)
-            self._proxy_test_btn.setText("⏳ 提取代理中...")
-
-            from PySide6.QtCore import QThread, Signal as QSignal
-
-            class ProxyApiTestWorker(QThread):
-                done = QSignal(dict)
-
-                def __init__(self, url, proto, user, pwd, tout):
-                    super().__init__()
-                    self._api_url = url
-                    self._protocol = proto
-                    self._username = user
-                    self._password = pwd
-                    self._timeout = tout
-
-                def run(self):
-                    # 1. 调 API 获取 ip:port
-                    fetch_result = fetch_proxy_from_api(self._api_url, timeout=self._timeout)
-                    if not fetch_result["success"]:
-                        self.done.emit({"success": False, "error": fetch_result["error"], "ip": "", "latency_ms": 0})
-                        return
-
-                    # 2. 构建代理 URL
-                    proxy_url = build_proxy_url(
-                        self._protocol, fetch_result["host"], fetch_result["port"],
-                        self._username, self._password
-                    )
-
-                    # 3. 测试代理连通性
-                    test_result = test_proxy_connection(proxy_url, timeout=self._timeout)
-                    test_result["fetched_ip"] = f"{fetch_result['host']}:{fetch_result['port']}"
-                    self.done.emit(test_result)
-
-            self._proxy_test_worker = ProxyApiTestWorker(api_url, protocol, username, password, timeout)
-            self._proxy_test_worker.done.connect(self._on_proxy_test_done)
-            self._proxy_test_worker.start()
-        else:
-            # 手动模式
-            host = self._proxy_host_input.text().strip()
-            port = self._proxy_port_input.text().strip()
-
-            if not host or not port:
-                QMessageBox.warning(self, "配置不完整", "请填写代理地址和端口")
-                return
-
-            proxy_url = build_proxy_url(protocol, host, port, username, password)
-
-            self._proxy_test_btn.setEnabled(False)
-            self._proxy_test_btn.setText("⏳ 测试中...")
-
-            from PySide6.QtCore import QThread, Signal as QSignal
-
-            class ProxyTestWorker(QThread):
-                done = QSignal(dict)
-
-                def __init__(self, url, tout):
-                    super().__init__()
-                    self._url = url
-                    self._timeout = tout
-
-                def run(self):
-                    result = test_proxy_connection(self._url, self._timeout)
-                    self.done.emit(result)
-
-            self._proxy_test_worker = ProxyTestWorker(proxy_url, timeout)
-            self._proxy_test_worker.done.connect(self._on_proxy_test_done)
-            self._proxy_test_worker.start()
-
-    def _on_proxy_test_done(self, result: dict):
-        """代理测试完成回调"""
-        self._proxy_test_btn.setEnabled(True)
-        self._proxy_test_btn.setText("🔌 测试连接")
-
-        if result.get("success"):
-            ip = result.get("ip", "unknown")
-            latency = result.get("latency_ms", 0)
-            fetched = result.get("fetched_ip", "")
-            country = result.get("country", "")
-            country_code = result.get("country_code", "")
-            msg = f"代理连接成功！\n\n出口 IP: {ip}"
-            if country or country_code:
-                msg += f" ({country}/{country_code})" if country else f" ({country_code})"
-            msg += f"\n延迟: {latency} ms"
-            if fetched:
-                msg += f"\n提取代理: {fetched}"
-            QMessageBox.information(self, "连接成功", msg)
-        else:
-            error = result.get("error", "未知错误")
-            QMessageBox.warning(self, "连接失败", f"代理连接失败：\n\n{error}")
+        # 更新 6 项图例
+        self._update_legend("input_hit", self._format_token_count(input_hit))
+        self._update_legend("input_rate", f"{input_rate * 100:.1f}%")
+        self._update_legend("output_hit", self._format_token_count(output_hit))
+        self._update_legend("output_rate", f"{output_rate * 100:.1f}%")
+        self._update_legend("total_hit", self._format_token_count(total_hit))
+        self._update_legend("total_rate", f"{total_rate * 100:.1f}%")
 
     # === 消耗明细分页逻辑 ===
 
@@ -1309,77 +788,9 @@ class AccountsPage(QWidget):
             self._usage_table.setItem(row, 3, QTableWidgetItem(str(log.get("completion_tokens", 0))))
             total_tokens = log.get("prompt_tokens", 0) + log.get("completion_tokens", 0)
             self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
+            credits = log.get("credits", 0)
+            self._usage_table.setItem(row, 5, QTableWidgetItem(f"{credits:.2f}" if credits else "-"))
         self._update_pager()
-
-    # === 数据 & 渲染 ===
-
-    def _apply_scroll_background(self):
-        """设置 QScrollArea 及其 viewport、内容 widget 的背景色跟随主题
-        参考 dashboard.py 的三管齐下方案，确保深色模式下不出现灰白背景
-        """
-        colors = _current_theme_colors()
-        bg = colors['bg_primary']
-        bg_color = QColor(bg)
-
-        # 1. QScrollArea 自身
-        self._scroll.setStyleSheet(
-            f"QScrollArea {{ background-color: {bg}; border: none; }}"
-        )
-
-        # 2. viewport — QAbstractScrollArea 的 viewport 是内部特殊 widget，
-        #    QSS 不可靠，必须用 QPalette + autoFillBackground 才能稳定生效
-        viewport = self._scroll.viewport()
-        viewport.setAutoFillBackground(True)
-        pal = viewport.palette()
-        pal.setColor(QPalette.ColorRole.Window, bg_color)
-        viewport.setPalette(pal)
-        viewport.setStyleSheet(f"background-color: {bg};")
-
-        # 3. content widget — 让 QScrollArea 里铺满深色
-        self._scroll.widget().setAutoFillBackground(True)
-        pal2 = self._scroll.widget().palette()
-        pal2.setColor(QPalette.ColorRole.Window, bg_color)
-        self._scroll.widget().setPalette(pal2)
-
-    def apply_theme(self):
-        """主题切换时调用（MainWindow.apply_theme 会触发）"""
-        if hasattr(self, '_scroll'):
-            self._apply_scroll_background()
-
-    def _load_accounts(self):
-        self._accounts = load_accounts()
-
-    def _apply_filter(self):
-        filtered = self._accounts
-
-        self._filtered_accounts = filtered
-        self._apply_sort()
-
-    def _account_sort_value(self, account: Account, column: int):
-        if column == 0:
-            return account.display_name.lower()
-        if column == 1:
-            return account.uid.lower()
-        if column == 2:
-            return account.quota.credits_remaining
-        if column == 3:
-            return account.auth_token.lower()
-        if column == 4:
-            return (
-                0 if account.status == AccountStatus.ACTIVE else 1,
-                0 if account.api_key else 1,
-                account.status.value,
-            )
-        return ""
-
-    def _apply_sort(self):
-        if self._sort_column is None:
-            return
-        reverse = self._sort_order == Qt.DescendingOrder
-        self._filtered_accounts.sort(
-            key=lambda account: self._account_sort_value(account, self._sort_column),
-            reverse=reverse,
-        )
 
     def _on_header_sort(self, section: int):
         if self._sort_column == section:
@@ -1397,12 +808,6 @@ class AccountsPage(QWidget):
         self._table.setRowCount(len(page_accounts))
 
         for row, account in enumerate(page_accounts):
-            # 昵称
-            self._table.setItem(row, 0, QTableWidgetItem(account.display_name))
-
-            # UID
-            self._table.setItem(row, 1, QTableWidgetItem(account.uid))
-
             # 积分列
             if account.quota.credits_total > 0:
                 credits_text = f"{account.quota.credits_remaining:.0f}/{account.quota.credits_total:.0f}"
@@ -1417,7 +822,7 @@ class AccountsPage(QWidget):
             else:
                 credits_item = QTableWidgetItem("无Token")
                 credits_item.setForeground(Qt.gray)
-            self._table.setItem(row, 2, credits_item)
+            self._table.setItem(row, 0, credits_item)
 
             # TK列 (auth_token 截断显示)
             tk_text = account.auth_token
@@ -1426,10 +831,10 @@ class AccountsPage(QWidget):
             else:
                 tk_display = ""
             tk_item = QTableWidgetItem(tk_display)
-            tk_item.setToolTip(tk_text if tk_text else "")  # 悬停显示完整值
+            tk_item.setToolTip(tk_text if tk_text else "")
             if not tk_text:
                 tk_item.setForeground(Qt.gray)
-            self._table.setItem(row, 3, tk_item)
+            self._table.setItem(row, 1, tk_item)
 
             has_api = bool(account.api_key)
             is_normal = account.status == AccountStatus.ACTIVE
@@ -1443,17 +848,17 @@ class AccountsPage(QWidget):
                 api_status_item.setForeground(Qt.gray)
             if account.status_reason:
                 api_status_item.setToolTip(account.status_reason)
-            self._table.setItem(row, 4, api_status_item)
+            self._table.setItem(row, 2, api_status_item)
 
         self._update_pager()
 
     def _refresh_table(self):
-        """全量刷新（重新加载+渲染）"""
+        """刷新（加载账号数据 + 使用情况图表 + 消耗明细 + 积分卡片）"""
         self._load_accounts()
-        self._apply_filter()
-        self._current_page = 0
-        self._render_page()
+        self._filtered_accounts = self._accounts
+        self._refresh_usage()
         self._refresh_usage_table()
+        self._update_quota_card()
 
     def _refresh_usage_table(self):
         """刷新消耗明细表格（从 ProxyDatabase 读取最近的 request_logs）"""
@@ -1498,15 +903,54 @@ class AccountsPage(QWidget):
         return accounts
 
     def _on_selection_changed(self):
-        selected = self._get_selected_accounts()
-        self._btn_batch_export.setVisible(bool(selected))
-        if selected:
-            self._btn_batch_export.setText(f"批量导出 ({len(selected)})")
-        if len(selected) > 1:
-            self._btn_batch_del.setVisible(True)
-            self._btn_batch_del.setText(f"🗑️ 批量删除 ({len(selected)})")
+        pass
+
+    def _update_quota_card(self):
+        """更新积分包余额进度条（从服务端查询）"""
+        self._quota_value_label.setText("⏳")
+        self._quota_packages_label.setText("查询中...")
+        self._quota_badge_label.setText("--")
+        self._quota_progress.setValue(0)
+
+        from PySide6.QtCore import QThread, Signal as QSignal
+
+        class CreditsThread(QThread):
+            done = QSignal(object)
+
+            def run(self):
+                from ...utils.server_api import get_credits
+                result = get_credits()
+                self.done.emit(result)
+
+        self._credits_thread = CreditsThread()
+        self._credits_thread.done.connect(self._on_credits_done)
+        self._credits_thread.start()
+
+    def _on_credits_done(self, result: dict):
+        """积分查询完成"""
+        if result and "credits" in result:
+            credits = result.get("credits", 0)
+            total_recharged = result.get("totalRecharged", 0)
+            total_used = result.get("totalUsed", 0)
+            today_used = result.get("todayUsed", 0)
+
+            self._quota_value_label.setText(f"{credits:.2f}")
+            self._quota_packages_label.setText(
+                f"累计充值 {total_recharged:.0f} · 已用 {total_used:.0f} · 今日 {today_used:.0f}"
+            )
+            self._quota_badge_label.setText(f"剩余 {credits:.0f}")
+
+            if total_recharged > 0:
+                percent = int(min(100, max(0, (credits / total_recharged) * 100)))
+                self._quota_progress.setValue(percent)
+            else:
+                self._quota_progress.setValue(0)
         else:
-            self._btn_batch_del.setVisible(False)
+            err = result.get("error", "查询失败") if result else "无响应"
+            self._quota_value_label.setText("--")
+            self._quota_packages_label.setText(f"查询失败: {err[:30]}")
+            self._quota_badge_label.setText("错误")
+            self._quota_progress.setValue(0)
 
     def _show_context_menu(self, pos):
         """右键菜单"""

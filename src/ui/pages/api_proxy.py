@@ -1535,25 +1535,18 @@ class ApiProxyPage(QWidget):
             progress = QSignal(str)
             done = QSignal(int, int)  # success, failed
 
-            def __init__(self, keys, db, max_workers=5, proxy=None):
+            def __init__(self, keys, db, max_workers=5):
                 super().__init__()
                 self._keys = keys
                 self._db = db
                 self.max_workers = max_workers
-                self._proxy = proxy
 
             def _query_one(self, k):
                 api_key = k.get("api_key", "")
                 label = k.get("label", api_key[:12])
-                # 每次查询前重新获取代理 IP（一号一IP）
-                from ...utils.proxy import get_proxy_with_info
-                _current_proxy, _proxy_info = get_proxy_with_info()
-                if _proxy_info:
-                    self.progress.emit(f"正在查询 {label}... 代理[{_proxy_info}]")
-                else:
-                    self.progress.emit(f"正在查询 {label}...")
+                self.progress.emit(f"正在查询 {label}...")
                 if api_key.startswith("ck_"):
-                    client = ApiClient.from_api_key(api_key, proxy=_current_proxy)
+                    client = ApiClient.from_api_key(api_key)
                 else:
                     from ...utils.store import load_accounts
                     accounts = load_accounts()
@@ -1563,16 +1556,15 @@ class ApiProxyPage(QWidget):
                             acc = a
                             break
                     if acc and acc.api_key and acc.api_key.startswith("ck_"):
-                        client = ApiClient.from_api_key(acc.api_key, proxy=_current_proxy)
+                        client = ApiClient.from_api_key(acc.api_key)
                     elif acc:
                         client = ApiClient(
                             access_token=acc.auth_token,
                             uid=acc.uid,
                             domain=acc.domain or "www.codebuddy.cn",
-                            proxy=_current_proxy,
                         )
                     else:
-                        client = ApiClient.from_api_key(api_key, proxy=_current_proxy)
+                        client = ApiClient.from_api_key(api_key)
                 return k, client.get_user_resource()
 
             def run(self):
@@ -1613,14 +1605,7 @@ class ApiProxyPage(QWidget):
                 self.done.emit(success, failed)
 
         max_workers = _get_account_concurrency_setting()
-        from ...utils.proxy import get_proxy_from_settings, ProxyConfigError
-        # 预检代理配置（不缓存 IP，每账号单独提取）
-        try:
-            get_proxy_from_settings()
-        except ProxyConfigError as e:
-            QMessageBox.warning(self, "代理配置错误", str(e))
-            return
-        self._points_worker = PointsRefreshWorker(keys_to_query, self._db, max_workers=max_workers, proxy=None)
+        self._points_worker = PointsRefreshWorker(keys_to_query, self._db, max_workers=max_workers)
         self._points_worker.progress.connect(
             lambda msg: self._stat_total.setText(f"⏳ {msg}")
         )
@@ -1665,13 +1650,12 @@ class ApiProxyPage(QWidget):
             progress = QSignal(str)
             done = QSignal(int, int, int)  # normal, abnormal, failed
 
-            def __init__(self, keys, db, max_workers=5, proxy=None):
+            def __init__(self, keys, db, max_workers=5):
                 super().__init__()
                 self._keys = keys
                 self._db = db
                 self._stop_flag = False
                 self.max_workers = max_workers
-                self._proxy = proxy
 
             def stop(self):
                 self._stop_flag = True
@@ -1679,14 +1663,8 @@ class ApiProxyPage(QWidget):
             def _check_one(self, k):
                 api_key = k.get("api_key", "")
                 label = k.get("label", api_key[:12])
-                # 每次检测前重新获取代理 IP（一号一IP）
-                from ...utils.proxy import get_proxy_with_info
-                _current_proxy, _proxy_info = get_proxy_with_info()
-                if _proxy_info:
-                    self.progress.emit(f"检测 {label}... 代理[{_proxy_info}]")
-                else:
-                    self.progress.emit(f"检测 {label}...")
-                result = check_api_key_chat_status(api_key, attempts=3, proxy=_current_proxy)
+                self.progress.emit(f"检测 {label}...")
+                result = check_api_key_chat_status(api_key, attempts=3)
                 return k, label, result
 
             def run(self):
@@ -1724,14 +1702,7 @@ class ApiProxyPage(QWidget):
                 self.done.emit(normal, abnormal, failed)
 
         max_workers = _get_account_concurrency_setting()
-        from ...utils.proxy import get_proxy_from_settings, ProxyConfigError
-        # 预检代理配置（不缓存 IP，每账号单独提取）
-        try:
-            get_proxy_from_settings()
-        except ProxyConfigError as e:
-            QMessageBox.warning(self, "代理配置错误", str(e))
-            return
-        self._status_check_worker = KeyStatusCheckWorker(keys_to_check, self._db, max_workers=max_workers, proxy=None)
+        self._status_check_worker = KeyStatusCheckWorker(keys_to_check, self._db, max_workers=max_workers)
         self._status_check_worker.progress.connect(
             lambda msg: self._stat_total.setText(f"🔍 {msg}")
         )

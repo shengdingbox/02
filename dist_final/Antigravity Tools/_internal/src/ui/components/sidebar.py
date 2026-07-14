@@ -54,11 +54,8 @@ class Sidebar(QWidget):
         layout.addWidget(logo_label)
 
         # 版本 + QQ群
-        version_qq_label = QLabel(f"{_get_version()}  💬QQ群:1025605799")
+        version_qq_label = QLabel(f"{_get_version()} ")
         version_qq_label.setObjectName("sidebar_version")
-        version_qq_label.setCursor(Qt.PointingHandCursor)
-        version_qq_label.setToolTip("点击复制QQ群号")
-        version_qq_label.mousePressEvent = lambda e: self._copy_qq_group()
         layout.addWidget(version_qq_label)
 
         # 分隔线

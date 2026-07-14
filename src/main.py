@@ -170,6 +170,24 @@ def main():
 
     logger.info("Buddy Tool 已启动")
 
+    # 启动时环境检测（代理软件 / Hook 工具 / 系统代理）
+    try:
+        from .utils.env_check import check_environment, format_env_warnings
+        env_result = check_environment()
+        env_text = format_env_warnings(env_result)
+        if env_text:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(_main_window, "环境检测", env_text)
+    except Exception as e:
+        logger.warning(f"环境检测失败: {e}")
+
+    # 启动时补交未上报的使用量记录
+    try:
+        from .utils.usage_reporter import flush_pending_reports_async
+        flush_pending_reports_async()
+    except Exception as e:
+        logger.warning(f"补交使用量记录失败: {e}")
+
     # 运行 Qt 事件循环
     ret = app.exec()
 

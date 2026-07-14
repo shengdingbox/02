@@ -221,16 +221,6 @@ def get_stylesheet(theme: str = "system") -> str:
         QFrame#card:hover {{
             border-color: {colors['accent']};
         }}
-
-        /* === 代理配置面板（账号管理页） === */
-        QFrame#proxy_config_frame {{
-            background-color: {colors['bg_card']};
-            border: 1px solid {colors['border']};
-            border-radius: 12px;
-        }}
-        QFrame#proxy_config_frame QLabel {{
-            background-color: transparent;
-        }}
         QFrame#proxy_control_card {{
             background-color: {colors['bg_card']};
             border: 1px solid {colors['border']};

@@ -54,7 +54,7 @@ _zh_cn = {
 
     # 账号管理
     "accounts.title": "额度管理",
-    "accounts.add_account": "添加账号",
+    "accounts.add_account": "激活卡密",
     "accounts.import_batch": "批量导入",
     "accounts.oauth_login": "OAuth 登录",
     "accounts.browser_login": "浏览器登录",
