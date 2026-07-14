@@ -774,6 +774,34 @@ class AccountsPage(QWidget):
         self._usage_table.setMaximumHeight(280)
         usage_layout.addWidget(self._usage_table)
 
+        # 消耗明细翻页栏
+        pager_row = QHBoxLayout()
+        self._btn_prev = QPushButton("◀ 上一页")
+        self._btn_prev.setObjectName("secondary_btn")
+        self._btn_prev.clicked.connect(self._prev_page)
+        pager_row.addWidget(self._btn_prev)
+
+        self._page_label = QLabel("0 / 0")
+        self._page_label.setStyleSheet("font-size: 13px; font-weight: 600;")
+        self._page_label.setAlignment(Qt.AlignCenter)
+        pager_row.addWidget(self._page_label)
+
+        self._btn_next = QPushButton("下一页 ▶")
+        self._btn_next.setObjectName("secondary_btn")
+        self._btn_next.clicked.connect(self._next_page)
+        pager_row.addWidget(self._btn_next)
+
+        pager_row.addStretch()
+
+        pager_row.addWidget(QLabel("跳到:"))
+        self._page_spin = QSpinBox()
+        self._page_spin.setRange(1, 1)
+        self._page_spin.setFixedWidth(70)
+        self._page_spin.valueChanged.connect(self._goto_page)
+        pager_row.addWidget(self._page_spin)
+
+        usage_layout.addLayout(pager_row)
+
         content_layout.addWidget(usage_card)
 
         # 进度条
@@ -1234,16 +1262,11 @@ class AccountsPage(QWidget):
             error = result.get("error", "未知错误")
             QMessageBox.warning(self, "连接失败", f"代理连接失败：\n\n{error}")
 
-    # === 分页逻辑 ===
+    # === 消耗明细分页逻辑 ===
 
     @property
     def _total_pages(self) -> int:
-        return max(1, (len(self._filtered_accounts) + PAGE_SIZE - 1) // PAGE_SIZE)
-
-    def _get_page_accounts(self) -> list:
-        start = self._current_page * PAGE_SIZE
-        end = start + PAGE_SIZE
-        return self._filtered_accounts[start:end]
+        return max(1, (len(self._usage_logs) + PAGE_SIZE - 1) // PAGE_SIZE)
 
     def _update_pager(self):
         total = self._total_pages
@@ -1258,17 +1281,35 @@ class AccountsPage(QWidget):
     def _prev_page(self):
         if self._current_page > 0:
             self._current_page -= 1
-            self._render_page()
+            self._render_usage_page()
 
     def _next_page(self):
         if self._current_page < self._total_pages - 1:
             self._current_page += 1
-            self._render_page()
+            self._render_usage_page()
 
     def _goto_page(self, page: int):
         if page >= 1 and page <= self._total_pages:
             self._current_page = page - 1
-            self._render_page()
+            self._render_usage_page()
+
+    def _render_usage_page(self):
+        """渲染当前页的消耗明细"""
+        start = self._current_page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        page_logs = self._usage_logs[start:end]
+
+        self._usage_table.setRowCount(len(page_logs))
+        for row, log in enumerate(reversed(page_logs)):
+            ts = log.get("timestamp", 0)
+            ts_text = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "-"
+            self._usage_table.setItem(row, 0, QTableWidgetItem(ts_text))
+            self._usage_table.setItem(row, 1, QTableWidgetItem(log.get("model", "-")))
+            self._usage_table.setItem(row, 2, QTableWidgetItem(str(log.get("prompt_tokens", 0))))
+            self._usage_table.setItem(row, 3, QTableWidgetItem(str(log.get("completion_tokens", 0))))
+            total_tokens = log.get("prompt_tokens", 0) + log.get("completion_tokens", 0)
+            self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
+        self._update_pager()
 
     # === 数据 & 渲染 ===
 
@@ -1351,8 +1392,8 @@ class AccountsPage(QWidget):
         self._render_page()
 
     def _render_page(self):
-        """只渲染当前页"""
-        page_accounts = self._get_page_accounts()
+        """渲染全部账号"""
+        page_accounts = self._filtered_accounts
         self._table.setRowCount(len(page_accounts))
 
         for row, account in enumerate(page_accounts):
@@ -1419,23 +1460,14 @@ class AccountsPage(QWidget):
         from ...modules.proxy_server import ProxyDatabase
         try:
             db = ProxyDatabase.get_instance()
-            logs = db.get_request_logs(limit=200)
+            logs = db.get_request_logs(limit=1000)
         except Exception:
             logs = []
 
         # 过滤掉输入和输出都为 0 的记录
-        logs = [l for l in logs if l.get("prompt_tokens", 0) > 0 or l.get("completion_tokens", 0) > 0]
-
-        self._usage_table.setRowCount(len(logs))
-        for row, log in enumerate(reversed(logs)):
-            ts = log.get("timestamp", 0)
-            ts_text = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "-"
-            self._usage_table.setItem(row, 0, QTableWidgetItem(ts_text))
-            self._usage_table.setItem(row, 1, QTableWidgetItem(log.get("model", "-")))
-            self._usage_table.setItem(row, 2, QTableWidgetItem(str(log.get("prompt_tokens", 0))))
-            self._usage_table.setItem(row, 3, QTableWidgetItem(str(log.get("completion_tokens", 0))))
-            total_tokens = log.get("prompt_tokens", 0) + log.get("completion_tokens", 0)
-            self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
+        self._usage_logs = [l for l in logs if l.get("prompt_tokens", 0) > 0 or l.get("completion_tokens", 0) > 0]
+        self._current_page = 0
+        self._render_usage_page()
 
     def _on_filter_changed(self):
         """筛选变化时重新渲染"""
@@ -1446,7 +1478,7 @@ class AccountsPage(QWidget):
 
     def _on_table_double_click(self, index):
         """双击行查看积分明细"""
-        page_accounts = self._get_page_accounts()
+        page_accounts = self._filtered_accounts
         row = index.row()
         if row >= len(page_accounts):
             return
@@ -1455,7 +1487,7 @@ class AccountsPage(QWidget):
 
     def _get_selected_accounts(self) -> list[Account]:
         """获取当前选中的账号列表"""
-        page_accounts = self._get_page_accounts()
+        page_accounts = self._filtered_accounts
         selected_rows = set()
         for item in self._table.selectedItems():
             selected_rows.add(item.row())
