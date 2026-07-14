@@ -6,20 +6,41 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit,
+<<<<<<< HEAD
     QDialog, QTextEdit, QFileDialog, QMessageBox,
     QMenu, QAbstractItemView, QSpinBox, QProgressBar
 )
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QCursor
+=======
+    QDialog, QFormLayout, QTextEdit, QFileDialog, QMessageBox,
+    QMenu, QSizePolicy, QAbstractItemView, QSpinBox, QProgressBar,
+    QCheckBox, QGroupBox, QStackedWidget, QScrollArea
+)
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QAction, QCursor, QPalette, QColor
+>>>>>>> origin/main
 
 from ...i18n import t
 from ...models import Account, Platform, AccountStatus, ResourcePackage
 from ...utils.store import load_accounts, save_account, delete_account, save_setting, load_setting
 from ...modules.api_client import ApiClient, check_api_key_chat_status
+from ..styles.theme import DARK_THEME, LIGHT_THEME
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 100  # 每页显示条数
+
+
+def _current_theme_colors() -> dict:
+    """获取当前主题色板（亮/暗），用于 viewport 等需要动态背景色的地方"""
+    from PySide6.QtWidgets import QApplication
+    theme = load_setting("theme", "system")
+    if theme == "system":
+        app = QApplication.instance()
+        is_dark = bool(app and app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+        theme = "dark" if is_dark else "light"
+    return DARK_THEME if theme == "dark" else LIGHT_THEME
 
 
 class AddAccountDialog(QDialog):
@@ -90,8 +111,275 @@ class AddAccountDialog(QDialog):
             QMessageBox.warning(self, t("common.warning"), "请输入 API Key")
             return
 
+<<<<<<< HEAD
         # 随机生成昵称
         nickname = f"账号_{secrets.token_hex(4)}"
+=======
+        self._status_label.setText("⏳ 正在验证 API Key...")
+        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+
+        # 用 API Key 查分验证有效性
+        remaining = 0
+        total = 0
+        try:
+            from ...modules.api_client import ApiClient
+            from ...utils.proxy import get_proxy_from_settings
+            _proxy = get_proxy_from_settings()
+            client = ApiClient.from_api_key(api_key, proxy=_proxy)
+            result = client.get_user_resource()
+            if result and result.get("success"):
+                remaining = result.get("remaining_credits", 0)
+                total = result.get("total_credits", 0)
+        except Exception as e:
+            self._status_label.setText(f"⚠️ 验证失败: {e}（仍可保存）")
+            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+
+        # 填充表单
+        self._token_input.setText(api_key)
+        self._uid_input.setText(uid)
+        self._nickname_input.setText(nickname)
+
+        # 同步导入到上游 Key 池（立即写盘）
+        try:
+            from ...modules.proxy_server import ProxyDatabase
+            proxy_db = ProxyDatabase.get_instance()
+            existing = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
+            if api_key not in existing:
+                import secrets as _sec
+                proxy_db.add_upstream_key({
+                    "key_id": f"ck_{_sec.token_hex(4)}",
+                    "api_key": api_key,
+                    "label": uid,
+                    "status": "active",
+                    "points": f"{remaining:.0f}/{total:.0f}" if total > 0 else "",
+                    "points_updated_at": "",
+                    "packages": [],
+                    "created_at": "",
+                })
+                proxy_db._dirty = True
+                proxy_db._flush_to_disk()
+        except Exception:
+            pass
+
+        status = f"✅ API Key 已验证: {nickname} ({uid})"
+        if total > 0:
+            status += f"  积分: {remaining:.0f}/{total:.0f}"
+        status += "\n已填充表单并导入上游Key池，点击「保存」完成"
+        self._status_label.setText(status)
+        self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
+
+    def _import_card_keys(self):
+        """粘贴卡密批量导入，格式：昵称----apikey。"""
+        from PySide6.QtWidgets import QDialogButtonBox, QVBoxLayout
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("卡密导入")
+        dialog.setMinimumSize(520, 360)
+        dlg_layout = QVBoxLayout(dialog)
+
+        hint = QLabel("每行一个账号，格式：昵称----apikey")
+        hint.setStyleSheet("color: #9BA4B0; font-size: 12px;")
+        dlg_layout.addWidget(hint)
+
+        text_edit = QTextEdit()
+        text_edit.setPlaceholderText("张三----ck_xxx\n李四----ck_xxx")
+        dlg_layout.addWidget(text_edit, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.button(QDialogButtonBox.Ok).setText("导入")
+        buttons.button(QDialogButtonBox.Cancel).setText(t("common.cancel"))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dlg_layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        accounts = []
+        invalid = []
+        for line_no, raw_line in enumerate(text_edit.toPlainText().splitlines(), start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if "----" not in line:
+                invalid.append(str(line_no))
+                continue
+            nickname, api_key = [part.strip() for part in line.split("----", 1)]
+            if not nickname or not api_key:
+                invalid.append(str(line_no))
+                continue
+            accounts.append({
+                "uid": nickname,
+                "nickname": nickname,
+                "auth_token": api_key,
+                "api_key": api_key,
+                "ck": "",
+                "platform": Platform.CODEBUDDY,
+            })
+
+        if not accounts:
+            QMessageBox.warning(self, t("common.warning"), "没有可导入的卡密，请检查格式：昵称----apikey")
+            return
+
+        if invalid:
+            reply = QMessageBox.question(
+                self,
+                "格式提醒",
+                f"有 {len(invalid)} 行格式不正确，将跳过这些行并继续导入吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        self._on_batch_accounts_imported(accounts)
+        QMessageBox.information(self, "导入完成", f"已导入 {len(accounts)} 个账号")
+
+    def _on_batch_accounts_imported(self, accounts: list):
+        """批量导入回调：保存所有账号并通知刷新，同时自动导入到上游Key池"""
+        if not accounts:
+            self._status_label.setText("⚠️ 没有可导入的账号")
+            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+            return
+
+        key_pool_count = 0
+
+        # 1. 批量导入到上游Key池（一次写磁盘）
+        try:
+            from ...modules.proxy_server import ProxyDatabase
+            proxy_db = ProxyDatabase.get_instance()
+            existing_keys = proxy_db.get_upstream_keys()
+            existing_api_keys = {k.get("api_key", "") for k in existing_keys}
+
+            for acc_data in accounts:
+                api_key = acc_data.get("api_key", "") or acc_data.get("auth_token", "")
+                if api_key and api_key not in existing_api_keys:
+                    # 尝试从导入数据的积分信息初始化 points
+                    points_str = ""
+                    points_updated = ""
+                    remaining = acc_data.get("credits_remaining", 0)
+                    total = acc_data.get("credits_total", 0)
+                    if total > 0:
+                        points_str = f"{remaining:.0f}/{total:.0f}"
+                        points_updated = "imported"
+                    key_data = {
+                        "key_id": f"ck_{secrets.token_hex(4)}",
+                        "api_key": api_key,
+                        "label": acc_data.get("nickname", "") or acc_data.get("uid", ""),
+                        "status": "active",
+                        "used_count": 0,
+                        "points": points_str,
+                        "points_updated_at": points_updated,
+                        "created_at": datetime.now().isoformat(),
+                    }
+                    proxy_db.add_upstream_key(key_data)
+                    existing_api_keys.add(api_key)
+                    key_pool_count += 1
+        except Exception:
+            pass  # Key池导入失败不影响账号导入
+
+        # 2. 保存账号到数据库
+        count = 0
+        last_account = None
+        for acc_data in accounts:
+            account = Account(
+                uid=acc_data.get("uid", ""),
+                nickname=acc_data.get("nickname", ""),
+                platform=acc_data.get("platform", Platform.CODEBUDDY),
+                auth_token=acc_data.get("auth_token", ""),
+                domain=acc_data.get("domain", "www.codebuddy.cn"),
+                ck=acc_data.get("ck", ""),
+                api_key=acc_data.get("api_key", ""),
+            )
+            if acc_data.get("quota"):
+                account.quota = acc_data["quota"]
+            save_account(account)
+            last_account = account
+            count += 1
+
+        if count > 0:
+            msg = f"✅ 已导入 {count} 个账号"
+            if key_pool_count > 0:
+                msg += f"\n🔑 已同步 {key_pool_count} 个 Key 到上游 Key 池"
+            self._status_label.setText(msg)
+            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
+            # 通知父页面 AccountsPage 刷新表格
+            self.account_added.emit(last_account)
+        else:
+            self._status_label.setText("⚠️ 没有可导入的账号")
+            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+
+    def _login_new(self):
+        """通过 WorkBuddy 浏览器登录新账号"""
+        from PySide6.QtCore import QThread, Signal as QSignal
+        from ...modules.oauth import WorkBuddyProcess
+
+        if WorkBuddyProcess.is_running():
+            reply = QMessageBox.question(
+                self, "需要关闭 WorkBuddy",
+                "登录新账号需要：\n\n"
+                "1. 关闭 WorkBuddy\n"
+                "2. 注销浏览器 SSO 会话\n"
+                "3. 清除所有登录数据\n"
+                "4. 重启 WorkBuddy 让你登录新账号\n\n"
+                "WorkBuddy 关闭后会自动重启，你确定继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self._status_label.setText("⏳ 正在关闭 WorkBuddy 并准备登录...")
+        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+
+        class LoginThread(QThread):
+            result_ready = QSignal(object)
+            status_update = QSignal(str)
+
+            def run(self):
+                result = WorkBuddyAuth.login_new_account(
+                    on_status=lambda s: self.status_update.emit(s),
+                    timeout=300,
+                )
+                self.result_ready.emit(result)
+
+        self._login_thread = LoginThread()
+        self._login_thread.result_ready.connect(self._on_login_result)
+        self._login_thread.status_update.connect(self._on_status_update)
+        self._login_thread.start()
+
+    def _on_status_update(self, status_text: str):
+        """登录流程状态更新"""
+        self._status_label.setText(f"⏳ {status_text}")
+        if "❌" in status_text:
+            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
+        elif "✅" in status_text:
+            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
+        else:
+            self._status_label.setStyleSheet("color: #2B6CB0; font-size: 12px;")
+
+    def _on_login_result(self, result):
+        """登录结果回调"""
+        if result:
+            self._token_input.setText(result.get("neodata_token", "") or result.get("access_token", ""))
+            self._uid_input.setText(result.get("uid", ""))
+            self._nickname_input.setText(result.get("nickname", ""))
+            self._status_label.setText(f"✅ 登录成功: {result.get('nickname', '新账号')}")
+            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
+        else:
+            self._status_label.setText("❌ 登录超时或失败，请重试")
+            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
+
+    def _save(self):
+        """保存账号"""
+        if not self._token_input.text() and not self._uid_input.text():
+            QMessageBox.warning(self, t("common.warning"), "请先提取或登录账号")
+            return
+
+        token = self._token_input.text()
+        # 如果 token 以 ck_ 开头，说明是 API Key，同时填到 api_key 字段
+        api_key = token if token.startswith("ck_") else ""
+>>>>>>> origin/main
 
         # 1. 保存账号到数据库
         account = Account(
@@ -354,6 +642,7 @@ class AccountsPage(QWidget):
         self.setObjectName("content_area")
         self._accounts = []
         self._filtered_accounts = []
+        self._usage_logs = []
         self._current_page = 0
         self._sort_column = None
         self._sort_order = Qt.AscendingOrder
@@ -378,7 +667,6 @@ class AccountsPage(QWidget):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(32, 0, 32, 32)
         content_layout.setSpacing(16)
-
         toolbar = QHBoxLayout()
 
         toolbar.addStretch()
@@ -501,7 +789,450 @@ class AccountsPage(QWidget):
         self._log_edit.setVisible(False)
         content_layout.addWidget(self._log_edit)
 
-        layout.addWidget(content)
+        # === IP 代理配置 ===
+        proxy_panel = self._build_proxy_config_ui()
+        content_layout.addWidget(proxy_panel)
+
+        # 整体可滚动 — 避免代理面板展开时把表格挤出可视范围
+        # viewport 必须显式 setAutoFillBackground + QPalette + QSS 三管齐下
+        # 否则深色模式下会显示系统默认浅色
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(content)
+        self._scroll.setFrameShape(QScrollArea.NoFrame)
+        self._apply_scroll_background()
+        layout.addWidget(self._scroll, 1)
+
+    # === IP 代理配置 ===
+
+    def _build_proxy_config_ui(self) -> QFrame:
+        """构建 IP 代理配置面板"""
+        frame = QFrame()
+        frame.setObjectName("proxy_config_frame")
+        frame.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
+
+        # 标题行 + 启用勾选
+        header_row = QHBoxLayout()
+        self._proxy_enabled_cb = QCheckBox("🔒 IP 代理")
+        self._proxy_enabled_cb.setStyleSheet("font-size: 14px; font-weight: 600;")
+        self._proxy_enabled_cb.toggled.connect(self._on_proxy_toggle)
+        header_row.addWidget(self._proxy_enabled_cb)
+        header_row.addStretch()
+        layout.addLayout(header_row)
+
+        # 说明文字
+        hint = QLabel("启用后，签到 / 查分 / 状态检查等操作将通过代理执行，API 转发服务不受影响")
+        hint.setStyleSheet("color: #718096; font-size: 12px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        # 配置区（可折叠）
+        self._proxy_config_widget = QWidget()
+        config_layout = QVBoxLayout(self._proxy_config_widget)
+        config_layout.setSpacing(8)
+
+        # 模式选择 + 协议
+        row0 = QHBoxLayout()
+        row0.addWidget(QLabel("模式:"))
+        self._proxy_mode_combo = QComboBox()
+        self._proxy_mode_combo.addItem("API", "api")
+        self._proxy_mode_combo.addItem("滚动IP", "rolling")
+        self._proxy_mode_combo.addItem("手动", "static")
+        self._proxy_mode_combo.setFixedWidth(80)
+        self._proxy_mode_combo.currentIndexChanged.connect(self._on_proxy_mode_changed)
+        row0.addWidget(self._proxy_mode_combo)
+
+        row0.addWidget(QLabel("协议:"))
+        self._proxy_protocol_combo = QComboBox()
+        self._proxy_protocol_combo.addItems(["HTTP", "SOCKS5"])
+        self._proxy_protocol_combo.setFixedWidth(90)
+        row0.addWidget(self._proxy_protocol_combo)
+        row0.addStretch()
+        config_layout.addLayout(row0)
+
+        # 用 QStackedWidget 切换 API 模式 / 手动模式
+        self._proxy_mode_stack = QStackedWidget()
+
+        # --- API 提取模式 ---
+        api_widget = QWidget()
+        api_layout = QVBoxLayout(api_widget)
+        api_layout.setContentsMargins(0, 0, 0, 0)
+        api_layout.setSpacing(4)
+        api_label = QLabel("代理 API 地址（返回 ip:port 格式）:")
+        api_label.setStyleSheet("font-size: 12px; color: #718096;")
+        api_layout.addWidget(api_label)
+        self._proxy_api_input = QLineEdit()
+        self._proxy_api_input.setPlaceholderText("http://api.example.com/getip?secret=xxx&format=txt&split=3")
+        # 离开输入框时自动保存，避免重启丢失
+        self._proxy_api_input.editingFinished.connect(self._save_proxy_settings)
+        api_layout.addWidget(self._proxy_api_input)
+        self._proxy_mode_stack.addWidget(api_widget)
+
+        # --- 滚动IP模式（rola.vip 风格）— 只保留刷新URL ---
+        rolling_widget = QWidget()
+        rolling_layout = QVBoxLayout(rolling_widget)
+        rolling_layout.setContentsMargins(0, 0, 0, 0)
+        rolling_layout.setSpacing(4)
+
+        rolling_label = QLabel("刷新URL（{user} 会替换为下方用户名）:")
+        rolling_label.setStyleSheet("font-size: 12px; color: #718096;")
+        rolling_layout.addWidget(rolling_label)
+        self._proxy_roll_refresh_input = QLineEdit()
+        self._proxy_roll_refresh_input.setPlaceholderText("https://refresh.rola.vip/refresh?user={user}")
+        self._proxy_roll_refresh_input.setMinimumHeight(34)
+        self._proxy_roll_refresh_input.editingFinished.connect(self._save_proxy_settings)
+        rolling_layout.addWidget(self._proxy_roll_refresh_input)
+
+        rolling_hint = QLabel("💡 协议固定 SOCKS5h，地址/端口/账号/密码在下方统一填写")
+        rolling_hint.setStyleSheet("font-size: 11px; color: #718096;")
+        rolling_layout.addWidget(rolling_hint)
+
+        self._proxy_mode_stack.addWidget(rolling_widget)
+
+        # --- 手动输入模式（占位，地址/端口在下方公共区） ---
+        static_widget = QWidget()
+        static_layout = QVBoxLayout(static_widget)
+        static_layout.setContentsMargins(0, 0, 0, 0)
+        static_hint = QLabel("在下方填写代理地址和端口")
+        static_hint.setStyleSheet("font-size: 12px; color: #718096;")
+        static_layout.addWidget(static_hint)
+        self._proxy_mode_stack.addWidget(static_widget)
+
+        config_layout.addWidget(self._proxy_mode_stack)
+
+        # --- 公共：地址 + 端口（滚动IP / 手动模式共用，API模式隐藏） ---
+        self._proxy_host_port_widget = QWidget()
+        hp_layout = QHBoxLayout(self._proxy_host_port_widget)
+        hp_layout.setContentsMargins(0, 0, 0, 0)
+        hp_layout.setSpacing(8)
+        hp_layout.addWidget(QLabel("地址:"))
+        self._proxy_host_input = QLineEdit()
+        self._proxy_host_input.setPlaceholderText("代理服务器 IP 或域名")
+        self._proxy_host_input.editingFinished.connect(self._save_proxy_settings)
+        hp_layout.addWidget(self._proxy_host_input, 1)
+        hp_layout.addWidget(QLabel("端口:"))
+        self._proxy_port_input = QLineEdit()
+        self._proxy_port_input.setPlaceholderText("1080")
+        self._proxy_port_input.editingFinished.connect(self._save_proxy_settings)
+        self._proxy_port_input.setFixedWidth(70)
+        hp_layout.addWidget(self._proxy_port_input)
+        config_layout.addWidget(self._proxy_host_port_widget)
+
+        # 认证（可选）
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("用户名:"))
+        self._proxy_username_input = QLineEdit()
+        self._proxy_username_input.setPlaceholderText("可选")
+        self._proxy_username_input.editingFinished.connect(self._save_proxy_settings)
+        row2.addWidget(self._proxy_username_input, 1)
+
+        row2.addWidget(QLabel("密码:"))
+        self._proxy_password_input = QLineEdit()
+        self._proxy_password_input.setPlaceholderText("可选")
+        self._proxy_password_input.setEchoMode(QLineEdit.Password)
+        self._proxy_password_input.editingFinished.connect(self._save_proxy_settings)
+        row2.addWidget(self._proxy_password_input, 1)
+        config_layout.addLayout(row2)
+
+        # 超时 + 按钮
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("超时:"))
+        self._proxy_timeout_spin = QSpinBox()
+        self._proxy_timeout_spin.setRange(5, 60)
+        self._proxy_timeout_spin.setValue(10)
+        self._proxy_timeout_spin.setSuffix(" 秒")
+        self._proxy_timeout_spin.setFixedWidth(100)
+        row3.addWidget(self._proxy_timeout_spin)
+
+        row3.addStretch()
+
+        self._proxy_test_btn = QPushButton("🔌 测试连接")
+        self._proxy_test_btn.setObjectName("secondary_btn")
+        self._proxy_test_btn.setCursor(Qt.PointingHandCursor)
+        self._proxy_test_btn.clicked.connect(self._test_proxy)
+        row3.addWidget(self._proxy_test_btn)
+
+        self._proxy_save_btn = QPushButton("💾 保存配置")
+        self._proxy_save_btn.setObjectName("primary_btn")
+        self._proxy_save_btn.setCursor(Qt.PointingHandCursor)
+        self._proxy_save_btn.clicked.connect(self._save_proxy_settings)
+        row3.addWidget(self._proxy_save_btn)
+        config_layout.addLayout(row3)
+
+        layout.addWidget(self._proxy_config_widget)
+
+        # 初始折叠
+        self._proxy_config_widget.setVisible(False)
+
+        # 加载已保存的配置
+        self._load_proxy_settings()
+
+        return frame
+
+    def _on_proxy_toggle(self, checked: bool):
+        """启用/禁用代理时展开/折叠配置区"""
+        self._proxy_config_widget.setVisible(checked)
+
+    def _on_proxy_mode_changed(self):
+        """切换 API 提取 / 滚动IP / 手动模式"""
+        mode = self._proxy_mode_combo.currentData()
+        idx = self._proxy_mode_combo.currentIndex()
+        self._proxy_mode_stack.setCurrentIndex(idx)
+        # API 模式不需要地址/端口，隐藏；滚动IP 和 手动模式需要，显示
+        if hasattr(self, "_proxy_host_port_widget"):
+            self._proxy_host_port_widget.setVisible(mode != "api")
+        # 滚动IP 模式协议固定 SOCKS5，自动切换并锁定
+        if mode == "rolling":
+            idx5 = self._proxy_protocol_combo.findText("SOCKS5")
+            if idx5 >= 0:
+                self._proxy_protocol_combo.setCurrentIndex(idx5)
+            self._proxy_protocol_combo.setEnabled(False)
+        else:
+            self._proxy_protocol_combo.setEnabled(True)
+
+    def _load_proxy_settings(self):
+        """从设置加载代理配置到 UI"""
+        enabled = load_setting("proxy_enabled", "false") == "true"
+        self._proxy_enabled_cb.setChecked(enabled)
+
+        protocol = load_setting("proxy_protocol", "HTTP")
+        idx = self._proxy_protocol_combo.findText(protocol, Qt.MatchFixedString)
+        if idx >= 0:
+            self._proxy_protocol_combo.setCurrentIndex(idx)
+
+        mode = load_setting("proxy_mode", "api")
+        mode_idx = self._proxy_mode_combo.findData(mode)
+        if mode_idx >= 0:
+            self._proxy_mode_combo.setCurrentIndex(mode_idx)
+            self._proxy_mode_stack.setCurrentIndex(mode_idx)
+
+        self._proxy_api_input.setText(load_setting("proxy_api_url", ""))
+        self._proxy_host_input.setText(load_setting("proxy_host", ""))
+        self._proxy_port_input.setText(load_setting("proxy_port", ""))
+        self._proxy_username_input.setText(load_setting("proxy_username", ""))
+        self._proxy_password_input.setText(load_setting("proxy_password", ""))
+        # 滚动IP模式刷新URL
+        if hasattr(self, "_proxy_roll_refresh_input"):
+            self._proxy_roll_refresh_input.setText(load_setting("proxy_refresh_url", ""))
+        self._proxy_timeout_spin.setValue(int(load_setting("proxy_timeout", "10")))
+        # 触发一次模式切换，更新地址/端口可见性 + 协议锁定
+        self._on_proxy_mode_changed()
+
+    def _save_proxy_settings(self):
+        """保存代理配置到设置（静默，自动保存和手动保存都不弹窗）"""
+        save_setting("proxy_enabled", "true" if self._proxy_enabled_cb.isChecked() else "false")
+        save_setting("proxy_protocol", self._proxy_protocol_combo.currentText())
+        mode = self._proxy_mode_combo.currentData()
+        save_setting("proxy_mode", mode)
+        save_setting("proxy_api_url", self._proxy_api_input.text().strip())
+        save_setting("proxy_host", self._proxy_host_input.text().strip())
+        save_setting("proxy_port", self._proxy_port_input.text().strip())
+        save_setting("proxy_username", self._proxy_username_input.text().strip())
+        save_setting("proxy_password", self._proxy_password_input.text())
+        # 滚动IP模式刷新URL
+        if hasattr(self, "_proxy_roll_refresh_input"):
+            save_setting("proxy_refresh_url", self._proxy_roll_refresh_input.text().strip())
+        save_setting("proxy_timeout", str(self._proxy_timeout_spin.value()))
+
+        # 清除代理缓存
+        from ...utils.proxy import invalidate_proxy_cache
+        invalidate_proxy_cache()
+
+        # 如果启用 SOCKS，检测 PySocks（依赖缺失必须弹窗提示）
+        if self._proxy_enabled_cb.isChecked():
+            protocol = self._proxy_protocol_combo.currentText().upper()
+            if protocol == "SOCKS5":
+                try:
+                    import socks  # noqa: F401
+                except ImportError:
+                    QMessageBox.warning(self, "依赖缺失",
+                        "SOCKS5 代理需要安装 PySocks 包：\n\npip install PySocks\n\n"
+                        "未安装时 SOCKS5 代理将无法使用。")
+                    return
+
+    def _test_proxy(self):
+        """测试代理连通性"""
+        from ...utils.proxy import (
+            build_proxy_url, test_proxy_connection,
+            fetch_proxy_from_api, invalidate_proxy_cache,
+        )
+
+        # 先保存配置（避免用户只测试不保存，重启后丢失）
+        self._save_proxy_settings()
+
+        protocol = self._proxy_protocol_combo.currentText().lower()
+        mode = self._proxy_mode_combo.currentData()
+        username = self._proxy_username_input.text().strip()
+        password = self._proxy_password_input.text()
+        timeout = self._proxy_timeout_spin.value()
+
+        # SOCKS 依赖检测
+        if protocol in ("socks4", "socks5"):
+            try:
+                import socks  # noqa: F401
+            except ImportError:
+                QMessageBox.warning(self, "依赖缺失",
+                    "SOCKS 代理需要安装 PySocks 包：\n\npip install PySocks")
+                return
+
+        if mode == "rolling":
+            # 滚动IP模式：先调刷新URL换IP，再测连接
+            host = self._proxy_host_input.text().strip()
+            port = self._proxy_port_input.text().strip()
+            roll_user = username   # 共用公共用户名
+            roll_pass = password   # 共用公共密码
+            refresh_url = self._proxy_roll_refresh_input.text().strip()
+
+            if not host or not port or not roll_user or not refresh_url:
+                QMessageBox.warning(self, "配置不完整", "请填写地址/端口/用户名/刷新URL")
+                return
+
+            # PySocks 检测
+            try:
+                import socks  # noqa: F401
+            except ImportError:
+                QMessageBox.warning(self, "依赖缺失",
+                    "滚动IP模式使用 SOCKS5h，需要 PySocks：\n\npip install PySocks")
+                return
+
+            self._proxy_test_btn.setEnabled(False)
+            self._proxy_test_btn.setText("⏳ 换IP中...")
+
+            from PySide6.QtCore import QThread, Signal as QSignal
+            from ...utils.proxy import fetch_rolling_proxy, test_proxy_connection
+
+            class ProxyRollingTestWorker(QThread):
+                done = QSignal(dict)
+
+                def __init__(self, h, p, u, pw, ru, tout):
+                    super().__init__()
+                    self._host = h
+                    self._port = p
+                    self._user = u
+                    self._pass = pw
+                    self._refresh_url = ru
+                    self._timeout = tout
+
+                def run(self):
+                    # 1. 调刷新URL换IP
+                    roll_result = fetch_rolling_proxy(
+                        host=self._host, port=self._port,
+                        username=self._user, password=self._pass,
+                        refresh_url_template=self._refresh_url,
+                        wait_seconds=3.0, timeout=self._timeout,
+                    )
+                    if not roll_result["success"]:
+                        self.done.emit({"success": False, "error": roll_result["error"], "ip": "", "latency_ms": 0})
+                        return
+                    # 2. 测代理连通性
+                    test_result = test_proxy_connection(roll_result["proxy_url"], timeout=self._timeout)
+                    test_result["fetched_ip"] = f"{self._host}:{self._port} (滚动IP)"
+                    self.done.emit(test_result)
+
+            self._proxy_test_worker = ProxyRollingTestWorker(host, port, roll_user, roll_pass, refresh_url, timeout)
+            self._proxy_test_worker.done.connect(self._on_proxy_test_done)
+            self._proxy_test_worker.start()
+
+        elif mode == "api":
+            # API 提取模式：先调 API 拿 ip:port，再测连接
+            api_url = self._proxy_api_input.text().strip()
+            if not api_url:
+                QMessageBox.warning(self, "配置不完整", "请填写代理 API 地址")
+                return
+
+            self._proxy_test_btn.setEnabled(False)
+            self._proxy_test_btn.setText("⏳ 提取代理中...")
+
+            from PySide6.QtCore import QThread, Signal as QSignal
+
+            class ProxyApiTestWorker(QThread):
+                done = QSignal(dict)
+
+                def __init__(self, url, proto, user, pwd, tout):
+                    super().__init__()
+                    self._api_url = url
+                    self._protocol = proto
+                    self._username = user
+                    self._password = pwd
+                    self._timeout = tout
+
+                def run(self):
+                    # 1. 调 API 获取 ip:port
+                    fetch_result = fetch_proxy_from_api(self._api_url, timeout=self._timeout)
+                    if not fetch_result["success"]:
+                        self.done.emit({"success": False, "error": fetch_result["error"], "ip": "", "latency_ms": 0})
+                        return
+
+                    # 2. 构建代理 URL
+                    proxy_url = build_proxy_url(
+                        self._protocol, fetch_result["host"], fetch_result["port"],
+                        self._username, self._password
+                    )
+
+                    # 3. 测试代理连通性
+                    test_result = test_proxy_connection(proxy_url, timeout=self._timeout)
+                    test_result["fetched_ip"] = f"{fetch_result['host']}:{fetch_result['port']}"
+                    self.done.emit(test_result)
+
+            self._proxy_test_worker = ProxyApiTestWorker(api_url, protocol, username, password, timeout)
+            self._proxy_test_worker.done.connect(self._on_proxy_test_done)
+            self._proxy_test_worker.start()
+        else:
+            # 手动模式
+            host = self._proxy_host_input.text().strip()
+            port = self._proxy_port_input.text().strip()
+
+            if not host or not port:
+                QMessageBox.warning(self, "配置不完整", "请填写代理地址和端口")
+                return
+
+            proxy_url = build_proxy_url(protocol, host, port, username, password)
+
+            self._proxy_test_btn.setEnabled(False)
+            self._proxy_test_btn.setText("⏳ 测试中...")
+
+            from PySide6.QtCore import QThread, Signal as QSignal
+
+            class ProxyTestWorker(QThread):
+                done = QSignal(dict)
+
+                def __init__(self, url, tout):
+                    super().__init__()
+                    self._url = url
+                    self._timeout = tout
+
+                def run(self):
+                    result = test_proxy_connection(self._url, self._timeout)
+                    self.done.emit(result)
+
+            self._proxy_test_worker = ProxyTestWorker(proxy_url, timeout)
+            self._proxy_test_worker.done.connect(self._on_proxy_test_done)
+            self._proxy_test_worker.start()
+
+    def _on_proxy_test_done(self, result: dict):
+        """代理测试完成回调"""
+        self._proxy_test_btn.setEnabled(True)
+        self._proxy_test_btn.setText("🔌 测试连接")
+
+        if result.get("success"):
+            ip = result.get("ip", "unknown")
+            latency = result.get("latency_ms", 0)
+            fetched = result.get("fetched_ip", "")
+            country = result.get("country", "")
+            country_code = result.get("country_code", "")
+            msg = f"代理连接成功！\n\n出口 IP: {ip}"
+            if country or country_code:
+                msg += f" ({country}/{country_code})" if country else f" ({country_code})"
+            msg += f"\n延迟: {latency} ms"
+            if fetched:
+                msg += f"\n提取代理: {fetched}"
+            QMessageBox.information(self, "连接成功", msg)
+        else:
+            error = result.get("error", "未知错误")
+            QMessageBox.warning(self, "连接失败", f"代理连接失败：\n\n{error}")
 
     # === 分页逻辑 ===
 
@@ -540,6 +1271,39 @@ class AccountsPage(QWidget):
             self._render_page()
 
     # === 数据 & 渲染 ===
+
+    def _apply_scroll_background(self):
+        """设置 QScrollArea 及其 viewport、内容 widget 的背景色跟随主题
+        参考 dashboard.py 的三管齐下方案，确保深色模式下不出现灰白背景
+        """
+        colors = _current_theme_colors()
+        bg = colors['bg_primary']
+        bg_color = QColor(bg)
+
+        # 1. QScrollArea 自身
+        self._scroll.setStyleSheet(
+            f"QScrollArea {{ background-color: {bg}; border: none; }}"
+        )
+
+        # 2. viewport — QAbstractScrollArea 的 viewport 是内部特殊 widget，
+        #    QSS 不可靠，必须用 QPalette + autoFillBackground 才能稳定生效
+        viewport = self._scroll.viewport()
+        viewport.setAutoFillBackground(True)
+        pal = viewport.palette()
+        pal.setColor(QPalette.ColorRole.Window, bg_color)
+        viewport.setPalette(pal)
+        viewport.setStyleSheet(f"background-color: {bg};")
+
+        # 3. content widget — 让 QScrollArea 里铺满深色
+        self._scroll.widget().setAutoFillBackground(True)
+        pal2 = self._scroll.widget().palette()
+        pal2.setColor(QPalette.ColorRole.Window, bg_color)
+        self._scroll.widget().setPalette(pal2)
+
+    def apply_theme(self):
+        """主题切换时调用（MainWindow.apply_theme 会触发）"""
+        if hasattr(self, '_scroll'):
+            self._apply_scroll_background()
 
     def _load_accounts(self):
         self._accounts = load_accounts()
@@ -584,7 +1348,6 @@ class AccountsPage(QWidget):
             self._sort_order = Qt.AscendingOrder
         self._table.horizontalHeader().setSortIndicator(section, self._sort_order)
         self._apply_sort()
-        self._current_page = 0
         self._render_page()
 
     def _render_page(self):
@@ -675,9 +1438,8 @@ class AccountsPage(QWidget):
             self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
 
     def _on_filter_changed(self):
-        """筛选变化时重置到第一页"""
+        """筛选变化时重新渲染"""
         self._apply_filter()
-        self._current_page = 0
         self._render_page()
 
     # === 双击/右键操作 ===
@@ -767,16 +1529,22 @@ class AccountsPage(QWidget):
         class DetailQueryThread(QThread):
             result_ready = QSignal(object, object)
 
-            def __init__(self, acc):
+            def __init__(self, acc, proxy=None):
                 super().__init__()
                 self._acc = acc
+                self._proxy = proxy
 
             def run(self):
-                client = ApiClient.from_account(self._acc)
+                client = ApiClient.from_account(self._acc, proxy=self._proxy)
                 result = client.get_user_resource()
                 self.result_ready.emit(self._acc, result)
 
-        thread = DetailQueryThread(account)
+        from ...utils.proxy import get_proxy_from_settings
+        try:
+            _proxy = get_proxy_from_settings()
+        except Exception:
+            _proxy = None
+        thread = DetailQueryThread(account, proxy=_proxy)
         thread.result_ready.connect(self._on_detail_query_result)
         thread.start()
         self._detail_thread = thread
@@ -825,16 +1593,22 @@ class AccountsPage(QWidget):
         class QuotaThread(QThread):
             result_ready = QSignal(object, object)  # (account, result_dict)
 
-            def __init__(self, acc):
+            def __init__(self, acc, proxy=None):
                 super().__init__()
                 self._acc = acc
+                self._proxy = proxy
 
             def run(self):
-                client = ApiClient.from_account(self._acc)
+                client = ApiClient.from_account(self._acc, proxy=self._proxy)
                 result = client.get_user_resource()
                 self.result_ready.emit(self._acc, result)
 
-        thread = QuotaThread(account)
+        from ...utils.proxy import get_proxy_from_settings
+        try:
+            _proxy = get_proxy_from_settings()
+        except Exception:
+            _proxy = None
+        thread = QuotaThread(account, proxy=_proxy)
         thread.result_ready.connect(self._on_single_quota_result)
         thread.start()
         self._quota_thread = thread
@@ -892,32 +1666,44 @@ class AccountsPage(QWidget):
 
         self._log_edit.clear()
         self._log_edit.setVisible(True)
+        from ...utils.proxy import describe_proxy_status
+        self._append_log(f"🌐 {describe_proxy_status()}")
         self._append_log(f"🚀 开始查询 {len(accounts_with_token)} 个账号积分，并发数: {max_workers}")
 
         from PySide6.QtCore import QThread, Signal as QSignal
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         class BatchQuotaWorker(QThread):
-            progress = QSignal(str, bool)  # uid, success
+            progress = QSignal(str, bool, str)  # uid, success, status_text
             finished_all = Signal()
 
-            def __init__(self, accs, max_workers=5):
+            def __init__(self, accs, max_workers=5, proxy=None):
                 super().__init__()
                 self._accounts = accs
                 self.max_workers = max_workers
+                self._proxy = proxy
                 self._stop_flag = False
 
             def stop(self):
                 self._stop_flag = True
 
             def _query_one(self, acc):
+                # 每次查询前重新获取代理 IP（API 模式：每账号一个新 IP）
+                from ...utils.proxy import get_proxy_with_info
+                _current_proxy, _proxy_info = get_proxy_with_info()
+
+                uid_short = acc.uid[:10] if acc.uid else "?"
+                proxy_tag = f"代理[{_proxy_info}]" if _proxy_info else "直连"
+                logger.info(f"📡 {uid_short} 使用{proxy_tag}查询积分")
+
                 try:
-                    client = ApiClient.from_account(acc)
+                    client = ApiClient.from_account(acc, proxy=_current_proxy)
                     result = client.get_user_resource()
                     result["uid"] = acc.uid
+                    result["_proxy_info"] = _proxy_info
                     return (acc.uid, result)
                 except Exception as e:
-                    return (acc.uid, {"success": False, "uid": acc.uid, "error": str(e)})
+                    return (acc.uid, {"success": False, "uid": acc.uid, "error": str(e), "_proxy_info": _proxy_info})
 
             def run(self):
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -929,7 +1715,11 @@ class AccountsPage(QWidget):
                             break
                         try:
                             uid, result = future.result()
-                            self.progress.emit(uid, result.get("success", False))
+                            proxy_info = result.get("_proxy_info", "")
+                            status = "✅ 成功" if result.get("success") else f"❌ 失败: {result.get('error', '未知错误')}"
+                            if proxy_info:
+                                status = f"代理[{proxy_info}] {status}"
+                            self.progress.emit(uid, result.get("success", False), status)
                             # 更新数据
                             if result.get("success"):
                                 for acc in self._accounts:
@@ -958,7 +1748,15 @@ class AccountsPage(QWidget):
                             pass
                 self.finished_all.emit()
 
-        self._batch_worker = BatchQuotaWorker(accounts_with_token, max_workers=max_workers)
+        from ...utils.proxy import get_proxy_from_settings, ProxyConfigError
+        # 预检代理配置是否可用（不缓存 IP，每账号单独提取）
+        try:
+            get_proxy_from_settings()
+        except ProxyConfigError as e:
+            QMessageBox.warning(self, "代理配置错误", str(e))
+            return
+
+        self._batch_worker = BatchQuotaWorker(accounts_with_token, max_workers=max_workers, proxy=None)
         self._batch_worker.progress.connect(self._on_batch_quota_progress)
         self._batch_worker.finished_all.connect(self._on_batch_quota_done)
         self._batch_worker.start()
@@ -979,12 +1777,13 @@ class AccountsPage(QWidget):
         scrollbar = self._log_edit.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def _on_batch_quota_progress(self, uid: str, success: bool):
+    def _on_batch_quota_progress(self, uid: str, success: bool, status_text: str = ""):
         """批量查询进度"""
         current = self._progress_bar.value() + 1
         self._progress_bar.setValue(current)
         icon = "✅" if success else "❌"
-        self._append_log(f"{icon} {uid[:12]}... {'成功' if success else '失败'}")
+        text = status_text if status_text else ("成功" if success else "失败")
+        self._append_log(f"{icon} {uid[:10]}... {text}")
 
     def _on_batch_quota_done(self):
         """批量查询完成"""
@@ -1018,6 +1817,8 @@ class AccountsPage(QWidget):
         self._progress_bar.setValue(0)
         self._log_edit.clear()
         self._log_edit.setVisible(True)
+        from ...utils.proxy import describe_proxy_status
+        self._append_log(f"🌐 {describe_proxy_status()}")
         self._append_log(f"🔍 开始检测 {len(accounts_with_key)} 个账号状态，并发数: {max_workers}")
 
         class StatusCheckWorker(QThread):
@@ -1025,10 +1826,11 @@ class AccountsPage(QWidget):
             progress = QSignal(str, bool, str)  # nickname, success, status_text
             done = QSignal(int, int, int, list, list)  # (正常, 异常, 失败, 异常key列表, 限流key列表)
 
-            def __init__(self, accounts, max_workers=5):
+            def __init__(self, accounts, max_workers=5, proxy=None):
                 super().__init__()
                 self._accounts = accounts
                 self.max_workers = max_workers
+                self._proxy = proxy
                 self._stop_flag = False
 
             def stop(self):
@@ -1037,12 +1839,21 @@ class AccountsPage(QWidget):
             def _check_one(self, acc):
                 api_key = acc.api_key
                 nickname = acc.nickname or acc.uid
+                # 每次检测前重新获取代理 IP（一号一IP）
+                from ...utils.proxy import get_proxy_with_info
+                _current_proxy, _proxy_info = get_proxy_with_info()
+                uid_short = (acc.uid or "?")[:10]
+                proxy_tag = f"代理[{_proxy_info}]" if _proxy_info else "直连"
+                logger.info(f"📡 {uid_short} 使用{proxy_tag}检测状态")
                 try:
-                    result = check_api_key_chat_status(api_key, attempts=3)
+                    result = check_api_key_chat_status(api_key, attempts=3, proxy=_current_proxy)
+                    status_text = result.get("status_text", "check_failed")
+                    if _proxy_info:
+                        status_text = f"代理[{_proxy_info}] {status_text}"
                     return (
                         nickname,
                         result.get("success", False),
-                        result.get("status_text", "check_failed"),
+                        status_text,
                         api_key,
                         result.get("flag"),
                     )
@@ -1079,7 +1890,15 @@ class AccountsPage(QWidget):
                             failed += 1
                 self.done.emit(normal, abnormal, failed, abnormal_keys, rate_limited_keys)
 
-        worker = StatusCheckWorker(accounts_with_key, max_workers=max_workers)
+        from ...utils.proxy import get_proxy_from_settings, ProxyConfigError
+        # 预检代理配置是否可用（不缓存 IP，每账号单独提取）
+        try:
+            get_proxy_from_settings()
+        except ProxyConfigError as e:
+            QMessageBox.warning(self, "代理配置错误", str(e))
+            return
+
+        worker = StatusCheckWorker(accounts_with_key, max_workers=max_workers, proxy=None)
 
         def _on_progress(nickname, success, status_text):
             current = self._progress_bar.value() + 1
@@ -1102,13 +1921,17 @@ class AccountsPage(QWidget):
                 for k in all_keys:
                     k_api = k.get("api_key", "")
                     k_id = k.get("key_id", "")
-                    if k_api in abnormal_keys and k.get("status") != "abnormal":
+                    k_status = k.get("status", "")
+                    # permanent_disabled（永久禁用）的 Key 不被检测覆盖，永不自动恢复
+                    if k_status == "permanent_disabled":
+                        continue
+                    if k_api in abnormal_keys and k_status != "abnormal":
                         proxy_db.update_upstream_key(k_id, {"status": "abnormal"})
-                    elif k_api in rate_limited_keys and k.get("status") != "rate_limited":
+                    elif k_api in rate_limited_keys and k_status != "rate_limited":
                         proxy_db.update_upstream_key(k_id, {"status": "rate_limited"})
                     elif (k_api not in abnormal_keys
                           and k_api not in rate_limited_keys
-                          and k.get("status") in ("abnormal", "rate_limited")):
+                          and k_status in ("abnormal", "rate_limited")):
                         # 之前异常/限流，本次检测通过 → 恢复 active
                         proxy_db.update_upstream_key(k_id, {"status": "active"})
                 proxy_db._dirty = True
@@ -1116,6 +1939,42 @@ class AccountsPage(QWidget):
                 self._append_log("✅ 上游 Key 池已同步")
             except Exception as e:
                 self._append_log(f"⚠️ 同步上游池失败: {e}")
+
+            # 同步到账号表（让"API状态"列实时更新）
+            try:
+                from ...models import AccountStatus
+                changed = 0
+                for acc in self._accounts:
+                    if not acc.api_key:
+                        continue
+                    # 用户手动设置的 INACTIVE/EXPIRED/QUOTA_EXHAUSTED 不被检测覆盖
+                    if acc.status in (AccountStatus.INACTIVE, AccountStatus.EXPIRED,
+                                      AccountStatus.QUOTA_EXHAUSTED):
+                        continue
+                    if acc.api_key in abnormal_keys:
+                        if acc.status != AccountStatus.ERROR or "风控" not in acc.status_reason:
+                            acc.status = AccountStatus.ERROR
+                            acc.status_reason = "风控异常"
+                            save_account(acc)
+                            changed += 1
+                    elif acc.api_key in rate_limited_keys:
+                        if acc.status != AccountStatus.ERROR or "限流" not in acc.status_reason:
+                            acc.status = AccountStatus.ERROR
+                            acc.status_reason = "限流(401)"
+                            save_account(acc)
+                            changed += 1
+                    else:
+                        # 本次检测通过，且账号是 ERROR 状态（之前被检测标过）→ 恢复 ACTIVE
+                        if acc.status == AccountStatus.ERROR:
+                            acc.status = AccountStatus.ACTIVE
+                            acc.status_reason = ""
+                            save_account(acc)
+                            changed += 1
+                if changed:
+                    self._append_log(f"✅ 账号表已同步（{changed} 个状态变更）")
+                    self._refresh_table()
+            except Exception as e:
+                self._append_log(f"⚠️ 同步账号表失败: {e}")
 
             rate_limited_count = len(rate_limited_keys)
             msg = f"检测完成：✅ 正常 {normal} 个"
