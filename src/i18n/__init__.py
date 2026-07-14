@@ -13,7 +13,7 @@ _translations: dict[str, dict[str, str]] = {}
 _zh_cn = {
     # 侧边栏
     "nav.dashboard": "仪表盘",
-    "nav.accounts": "账号管理",
+    "nav.accounts": "额度管理",
     "nav.checkin": "每日签到",
     "nav.quota": "配额监控",
     "nav.api_proxy": "API 代理",
@@ -53,7 +53,7 @@ _zh_cn = {
     "common.inactive": "未激活",
 
     # 账号管理
-    "accounts.title": "账号管理",
+    "accounts.title": "额度管理",
     "accounts.add_account": "添加账号",
     "accounts.import_batch": "批量导入",
     "accounts.oauth_login": "OAuth 登录",

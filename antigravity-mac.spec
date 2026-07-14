@@ -1,12 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Antigravity Tools - macOS PyInstaller 打包配置
+"""Buddy Tool - macOS PyInstaller 打包配置
 
 用法:
-    cd /path/to/antigravity-tools-mac
+    cd /path/to/buddy-tool-mac
     python3 -m PyInstaller antigravity-mac.spec
 
 输出:
-    dist/Antigravity Tools.app  (macOS .app bundle)
+    dist/Buddy Tool.app  (macOS .app bundle)
 """
 
 import os
@@ -161,7 +161,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Antigravity Tools',
+    name='Buddy Tool',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -184,19 +184,19 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Antigravity Tools',
+    name='Buddy Tool',
 )
 
 # ─── macOS .app bundle ───
 app = BUNDLE(
     coll,
-    name='Antigravity Tools.app',
+    name='Buddy Tool.app',
     icon=None,
-    bundle_identifier='com.antigravity.tools',
+    bundle_identifier='com.buddy.tool',
     info_plist={
-        'CFBundleName': 'Antigravity Tools',
-        'CFBundleDisplayName': 'Antigravity Tools',
-        'CFBundleIdentifier': 'com.antigravity.tools',
+        'CFBundleName': 'Buddy Tool',
+        'CFBundleDisplayName': 'Buddy Tool',
+        'CFBundleIdentifier': 'com.buddy.tool',
         'CFBundleVersion': APP_VERSION,
         'CFBundleShortVersionString': APP_VERSION,
         'NSHighResolutionCapable': True,

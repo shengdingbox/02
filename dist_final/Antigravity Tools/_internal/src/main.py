@@ -82,7 +82,7 @@ def _check_single_instance() -> bool:
 
     # 尝试连接已有服务器
     socket = QLocalSocket()
-    socket.connectToServer("antigravity-tools-single-instance")
+    socket.connectToServer("antigravity-tools-single-instance-debug")
     socket.waitForConnected(500)
 
     if socket.state() == QLocalSocket.ConnectedState:
@@ -97,7 +97,7 @@ def _check_single_instance() -> bool:
     from PySide6.QtNetwork import QLocalServer
 
     _single_server = QLocalServer()
-    _single_server.listen("antigravity-tools-single-instance")
+    _single_server.listen("antigravity-tools-single-instance-debug")
 
     # 保存到全局以便 main() 中使用
     global _single_instance_server

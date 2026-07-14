@@ -3,7 +3,7 @@
 更新流程:
 1. 启动时 & 每小时检测更新
    - 优先查国内服务器 (http://103.36.63.44:9680/version.json)
-   - 服务器失败时 fallback 到 GitHub Release API (https://api.github.com/repos/qinchangxv/antigravity-tools/releases/latest)
+   - 服务器失败时 fallback 到 GitHub Release API (https://api.github.com/repos/qinchangxv/buddy-tool/releases/latest)
 2. 对比本地版本号 (src/VERSION)
 3. 有新版本 → 弹窗提示(含changelog) → 用户确认 → 下载更新包
 4. 源码模式: 解压覆盖 src/ → 提示重启
@@ -28,7 +28,7 @@ from PySide6.QtCore import QObject, Signal, QTimer, Slot
 logger = logging.getLogger(__name__)
 
 # ─── 更新源（双源策略：服务器优先，GitHub 兜底）───
-GITHUB_REPO = "qinchangxv/antigravity-tools"
+GITHUB_REPO = "qinchangxv/buddy-tool"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 # GitHub token 认证（避免 rate limit，从环境变量读取，不在代码中硬编码）
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
@@ -303,7 +303,7 @@ def _fetch_github_release(timeout: int = 15) -> dict | None:
     {
         "version": "1.8.0",
         "changelog": "...",
-        "download_url": "https://github.com/.../Antigravity-Tools-Windows-x64.zip",
+        "download_url": "https://github.com/.../Buddy-Tool-Windows-x64.zip",
         "sha256": "",
         "source": "github"
     }
@@ -311,7 +311,7 @@ def _fetch_github_release(timeout: int = 15) -> dict | None:
     try:
         import urllib.request
         req = urllib.request.Request(GITHUB_API_URL)
-        req.add_header("User-Agent", "AntigravityTools/1.0")
+        req.add_header("User-Agent", "BuddyTool/1.0")
         req.add_header("Accept", "application/vnd.github+json")
         if GITHUB_TOKEN:
             req.add_header("Authorization", f"token {GITHUB_TOKEN}")
@@ -356,7 +356,7 @@ def _fetch_server_version(timeout: int = 10) -> dict | None:
     try:
         import urllib.request
         req = urllib.request.Request(VERSION_URL)
-        req.add_header("User-Agent", "AntigravityTools/1.0")
+        req.add_header("User-Agent", "BuddyTool/1.0")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             data["source"] = "server"
@@ -433,7 +433,7 @@ def _download_update(url: str, dest: Path, progress_callback=None, timeout: int 
     try:
         import urllib.request
         req = urllib.request.Request(url)
-        req.add_header("User-Agent", "AntigravityTools/1.0")
+        req.add_header("User-Agent", "BuddyTool/1.0")
 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             total = int(resp.headers.get("Content-Length", 0))
@@ -949,7 +949,7 @@ def _apply_frozen_update_windows(zip_path: Path) -> bool:
 
         new_exe = None
         for exe_path in tmp_dir.rglob("*.exe"):
-            if "Antigravity Tools" in exe_path.name or "antigravity" in exe_path.name.lower():
+            if "Buddy Tool" in exe_path.name or "buddy" in exe_path.name.lower() or "Antigravity Tools" in exe_path.name or "antigravity" in exe_path.name.lower():
                 new_exe = exe_path
                 break
         if not new_exe:
@@ -1277,7 +1277,7 @@ class UpdateChecker(QObject):
             try:
                 # 打包模式
                 if getattr(sys, 'frozen', False):
-                    tmp_dir = Path(tempfile.gettempdir()) / "antigravity-update"
+                    tmp_dir = Path(tempfile.gettempdir()) / "buddy-update"
                     tmp_dir.mkdir(exist_ok=True)
 
                     def _progress(downloaded, total):
@@ -1323,7 +1323,7 @@ class UpdateChecker(QObject):
                     return
 
                 # 源码模式：下载 zip 解压覆盖 src/
-                tmp_dir = Path(tempfile.gettempdir()) / "antigravity-update"
+                tmp_dir = Path(tempfile.gettempdir()) / "buddy-update"
                 tmp_dir.mkdir(exist_ok=True)
                 zip_path = tmp_dir / "update.zip"
 
@@ -1351,7 +1351,7 @@ class UpdateChecker(QObject):
                 self._downloading = False
                 # 清理临时文件
                 try:
-                    tmp_dir = Path(tempfile.gettempdir()) / "antigravity-update"
+                    tmp_dir = Path(tempfile.gettempdir()) / "buddy-update"
                     if tmp_dir.exists():
                         shutil.rmtree(tmp_dir, ignore_errors=True)
                 except Exception:

@@ -11,12 +11,12 @@ from ..models import (
     CheckinInfo, QuotaInfo,
 )
 
-DB_NAME = "antigravity.db"
+DB_NAME = "buddy.db"
 
 
 def _get_db_path() -> Path:
     """获取数据库路径"""
-    app_dir = Path.home() / ".antigravity-tools"
+    app_dir = Path.home() / ".buddy-tool"
     try:
         app_dir.mkdir(exist_ok=True)
     except OSError:

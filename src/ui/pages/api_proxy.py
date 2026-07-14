@@ -748,6 +748,7 @@ class ApiProxyPage(QWidget):
         super().__init__(parent)
         self.setObjectName("content_area")
         self._proxy_server: ProxyServer = None
+        self._dashboard_ref = None  # DashboardPage 引用，由 set_dashboard_page 注入
         self._db = ProxyDatabase.get_instance()
         self._keys_sort_column = None
         self._keys_sort_order = Qt.AscendingOrder
@@ -755,7 +756,11 @@ class ApiProxyPage(QWidget):
         self._subkeys_sort_order = Qt.AscendingOrder
         self._setup_ui()
 
-        # 日志自动刷新定时器
+    def set_dashboard_page(self, dashboard):
+        """注入 DashboardPage 引用"""
+        self._dashboard_ref = dashboard
+
+    # 日志自动刷新定时器
         self._log_timer = QTimer(self)
         self._log_timer.timeout.connect(self._refresh_log)
         self._last_log_timestamp = 0.0  # 跟踪上次最新日志时间戳，避免无变化时重复刷新
@@ -783,89 +788,23 @@ class ApiProxyPage(QWidget):
         content_layout.setContentsMargins(32, 0, 32, 32)
         content_layout.setSpacing(16)
 
-        # ─── 服务控制区 ───
-        control_card = QFrame()
-        control_card.setObjectName("card")
-        control_layout = QVBoxLayout(control_card)
-        control_layout.setSpacing(10)
-
-        # 端口和访问控制
-        config_row = QHBoxLayout()
-        config_row.addWidget(QLabel("端口:"))
+        # ─── 服务控制区已移至仪表盘，此处仅保留控件引用用于逻辑 ───
+        # 创建控件但不加入布局（仪表盘有自己的控件显示）
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1024, 65535)
         self._port_spin.setValue(int(load_setting("proxy_port", "8002")))
-        config_row.addWidget(self._port_spin)
-
-        config_row.addWidget(QLabel("  "))
-        self._listen_mode_combo = QComboBox()
-        self._listen_mode_combo.addItem("🔒 本地模式", "local")
-        self._listen_mode_combo.addItem("🌐 开放模式", "open")
-        self._listen_mode_combo.setCurrentIndex(0)
-        self._listen_mode_combo.currentIndexChanged.connect(self._on_listen_mode_changed)
-        config_row.addWidget(self._listen_mode_combo)
-
-        config_row.addWidget(QLabel("  "))
-        config_row.addWidget(QLabel("最低积分:"))
-        self._min_credits_spin = QSpinBox()
-        self._min_credits_spin.setRange(0, 100000)
-        self._min_credits_spin.setValue(int(load_setting("min_credits_threshold", "0")))
-        self._min_credits_spin.setSuffix(" 分")
-        self._min_credits_spin.setToolTip("低于此积分自动禁用 Key（0=不限制）")
-        config_row.addWidget(self._min_credits_spin)
-
-        config_row.addWidget(QLabel("  "))
-        config_row.addWidget(QLabel("自动启用:"))
-        self._auto_enable_spin = QSpinBox()
-        self._auto_enable_spin.setRange(0, 100000)
-        self._auto_enable_spin.setValue(int(load_setting("auto_enable_threshold", "100")))
-        self._auto_enable_spin.setSuffix(" 分")
-        self._auto_enable_spin.setToolTip("查分高于此值自动恢复禁用的 Key")
-        config_row.addWidget(self._auto_enable_spin)
-
-        config_row.addStretch()
 
         self._status_label = QLabel("⏹ 已停止")
         self._status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
-        config_row.addWidget(self._status_label)
 
         self._toggle_btn = QPushButton("▶ 启动服务")
         self._toggle_btn.setObjectName("primary_btn")
-        self._toggle_btn.setCursor(Qt.PointingHandCursor)
-        self._toggle_btn.clicked.connect(self._toggle_service)
-        config_row.addWidget(self._toggle_btn)
 
-        control_layout.addLayout(config_row)
-
-        # 服务 URL 显示
-        url_row = QHBoxLayout()
-        url_row.addWidget(QLabel("接口地址:"))
         self._url_label = QLabel("http://127.0.0.1:8002/v1")
         self._url_label.setStyleSheet("color: #2B6CB0; font-weight: 600; font-size: 13px;")
-        self._url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        url_row.addWidget(self._url_label)
-
-        btn_copy_url = QPushButton("📋 复制")
-        btn_copy_url.setObjectName("secondary_btn")
-        btn_copy_url.setCursor(Qt.PointingHandCursor)
-        btn_copy_url.setFixedWidth(60)
-        btn_copy_url.clicked.connect(self._copy_url)
-        url_row.addWidget(btn_copy_url)
-
-        url_row.addStretch()
-        control_layout.addLayout(url_row)
-
-        # 开放模式提示（默认隐藏）
-        self._open_mode_hint = QLabel("")
-        self._open_mode_hint.setStyleSheet("color: #FC8181; font-size: 12px; padding: 4px 8px; background: rgba(229,62,62,0.1); border-radius: 4px;")
-        self._open_mode_hint.setWordWrap(True)
-        self._open_mode_hint.setVisible(False)
-        control_layout.addWidget(self._open_mode_hint)
 
         # 注意：上游代理地址已加密隐藏，不在UI显示
         # 管理密码已移除，不需要管理员后台
-
-        content_layout.addWidget(control_card)
 
         # ─── Tab 区：上游 Key 池 / 子 API Keys / 使用日志 ───
         self._tab_widget = QTabWidget()
@@ -963,91 +902,19 @@ class ApiProxyPage(QWidget):
 
         self._tab_widget.addTab(keys_tab, "🔑 上游 Key 池")
 
-        # === Tab 2: 子 API Keys ===
-        subkeys_tab = QWidget()
-        subkeys_layout = QVBoxLayout(subkeys_tab)
-        subkeys_layout.setSpacing(10)
-
-        # 统计行
-        sk_stats_row = QHBoxLayout()
-        self._sk_stat_total = QLabel("📋 总 Key: 0")
-        self._sk_stat_total.setStyleSheet("font-size: 13px; font-weight: 600;")
-        sk_stats_row.addWidget(self._sk_stat_total)
-        self._sk_stat_active = QLabel("✅ 活跃: 0")
-        self._sk_stat_active.setStyleSheet("font-size: 13px; font-weight: 600; color: #38A169;")
-        sk_stats_row.addWidget(self._sk_stat_active)
-        self._sk_stat_disabled = QLabel("🚫 禁用: 0")
-        self._sk_stat_disabled.setStyleSheet("font-size: 13px; font-weight: 600; color: #D69E2E;")
-        sk_stats_row.addWidget(self._sk_stat_disabled)
-        self._sk_stat_total_used = QLabel("📊 总调用: 0")
-        self._sk_stat_total_used.setStyleSheet("font-size: 13px; font-weight: 600; color: #805AD5;")
-        sk_stats_row.addWidget(self._sk_stat_total_used)
-        sk_stats_row.addStretch()
-        subkeys_layout.addLayout(sk_stats_row)
-
-        # 工具栏
-        sk_toolbar = QHBoxLayout()
-        btn_create_sk = QPushButton("➕ 创建子 Key")
-        btn_create_sk.setObjectName("primary_btn")
-        btn_create_sk.setCursor(Qt.PointingHandCursor)
-        btn_create_sk.clicked.connect(self._create_sub_key)
-        sk_toolbar.addWidget(btn_create_sk)
-
-        btn_refresh_sk = QPushButton("🔄 刷新")
-        btn_refresh_sk.setObjectName("secondary_btn")
-        btn_refresh_sk.setCursor(Qt.PointingHandCursor)
-        btn_refresh_sk.clicked.connect(self._refresh_sub_keys)
-        sk_toolbar.addWidget(btn_refresh_sk)
-
-        btn_del_wb = QPushButton("🗑️ 删除WB配置")
-        btn_del_wb.setObjectName("secondary_btn")
-        btn_del_wb.setCursor(Qt.PointingHandCursor)
-        btn_del_wb.setToolTip("删除 WorkBuddy 的 models.json 配置文件")
-        btn_del_wb.clicked.connect(self._delete_workbuddy_config)
-        sk_toolbar.addWidget(btn_del_wb)
-
-        btn_del_cb = QPushButton("🗑️ 删除CB配置")
-        btn_del_cb.setObjectName("secondary_btn")
-        btn_del_cb.setCursor(Qt.PointingHandCursor)
-        btn_del_cb.setToolTip("删除 CodeBuddy 的 models.json 配置文件")
-        btn_del_cb.clicked.connect(self._delete_codebuddy_config)
-        sk_toolbar.addWidget(btn_del_cb)
-
-        # 当天/总计切换
-        self._subkeys_today_only = False
-        self._chk_subkeys_today = QPushButton("📅 当天")
-        self._chk_subkeys_today.setObjectName("secondary_btn")
-        self._chk_subkeys_today.setCheckable(True)
-        self._chk_subkeys_today.setCursor(Qt.PointingHandCursor)
-        self._chk_subkeys_today.setToolTip("开启后只显示当天统计，关闭显示总计")
-        self._chk_subkeys_today.clicked.connect(self._toggle_subkeys_today)
-        sk_toolbar.addWidget(self._chk_subkeys_today)
-
-        sk_toolbar.addStretch()
-        subkeys_layout.addLayout(sk_toolbar)
-
-        # 子 Key 表格
+        # === 子 API Keys Tab 已移至仪表盘，仅保留表格引用用于兼容 ===
         self._subkeys_table = QTableWidget()
         self._subkeys_table.setColumnCount(12)
         self._subkeys_table.setHorizontalHeaderLabels([
             "API Key", "标签", "状态", "模型限制", "已用/上限", "总积分", "调用模式", "RPM", "Token", "积分消耗", "缓存命中", "操作"
         ])
-        subkeys_header = self._subkeys_table.horizontalHeader()
-        subkeys_header.setSectionResizeMode(QHeaderView.Stretch)
-        subkeys_header.setSectionsClickable(True)
-        subkeys_header.setSortIndicatorShown(True)
-        subkeys_header.sectionClicked.connect(self._on_subkeys_header_sort)
-        self._subkeys_table.setAlternatingRowColors(True)
-        self._subkeys_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._subkeys_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._subkeys_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._subkeys_table.customContextMenuRequested.connect(self._on_subkeys_context_menu)
-        self._subkeys_table.cellDoubleClicked.connect(self._on_subkey_double_clicked)
-        subkeys_layout.addWidget(self._subkeys_table)
+        self._sk_stat_total = QLabel("0")
+        self._sk_stat_active = QLabel("0")
+        self._sk_stat_disabled = QLabel("0")
+        self._sk_stat_total_used = QLabel("0")
+        self._subkeys_today_only = False
 
-        self._tab_widget.addTab(subkeys_tab, "🗝️ 子 API Keys")
-
-        # === Tab 3: 使用日志 ===
+        # === Tab 2: 使用日志 ===
         log_tab = QWidget()
         log_layout = QVBoxLayout(log_tab)
 
@@ -1080,23 +947,10 @@ class ApiProxyPage(QWidget):
 
     # === 服务控制 ===
 
-    def _on_listen_mode_changed(self, index: int):
-        """监听模式切换时更新提示和 URL"""
-        mode = self._listen_mode_combo.currentData()  # "local" or "open"
-        port = self._port_spin.value()
-
-        if mode == "open":
-            ips = self._get_local_ips()
-            ip_list = "、".join(ips) if ips else "未检测到"
-            self._open_mode_hint.setText(
-                f"⚠️ 开放模式：所有能连到本机的用户都可访问。必须创建子Key并分发给用户，未携带子Key的请求将被拒绝。"
-                f"\n本机IP: {ip_list}，其他用户连接地址: http://{ips[0] if ips else '本机IP'}:{port}/v1"
-            )
-            self._open_mode_hint.setVisible(True)
-            self._url_label.setText(f"http://{ips[0] if ips else '0.0.0.0'}:{port}/v1")
-        else:
-            self._open_mode_hint.setVisible(False)
-            self._url_label.setText(f"http://127.0.0.1:{port}/v1")
+    def _sync_controls_from_dashboard(self):
+        """从仪表盘同步端口值到隐藏控件（服务控制区已移至仪表盘）"""
+        if self._dashboard_ref:
+            self._port_spin.setValue(self._dashboard_ref._port_spin.value())
 
     @staticmethod
     def _get_local_ips() -> list:
@@ -1127,6 +981,7 @@ class ApiProxyPage(QWidget):
 
     def _toggle_service(self):
         """启动/停止代理服务"""
+        self._sync_controls_from_dashboard()
         if self._proxy_server and self._proxy_server.is_running:
             self._proxy_server.stop()
             self._proxy_server = None
@@ -1137,11 +992,10 @@ class ApiProxyPage(QWidget):
             self._toggle_btn.setText("▶ 启动服务")
             self._toggle_btn.setObjectName("primary_btn")
             self._port_spin.setEnabled(True)
-            self._listen_mode_combo.setEnabled(True)
         else:
             port = self._port_spin.value()
-            mode = self._listen_mode_combo.currentData()  # "local" or "open"
-            host = "127.0.0.1" if mode == "local" else "0.0.0.0"
+            mode = "open"
+            host = "0.0.0.0"
             self._cleanup_legacy_models_on_start(port, mode)
 
             self._proxy_server = ProxyServer(host=host, port=port, mode=mode)
@@ -1151,29 +1005,13 @@ class ApiProxyPage(QWidget):
                 # 否则页面自己的 _db 实例看不到服务端写入的日志
                 self._db = self._proxy_server.db
                 save_setting("proxy_port", str(port))
-                # 保存积分阈值设置，并同步到所有上游 Key
-                min_val = self._min_credits_spin.value()
-                auto_val = self._auto_enable_spin.value()
-                save_setting("min_credits_threshold", str(min_val))
-                save_setting("auto_enable_threshold", str(auto_val))
-                # 同步阈值到所有上游 Key
-                for k in self._db.get_upstream_keys():
-                    self._db.update_upstream_key(k["key_id"], {
-                        "min_credits_threshold": float(min_val),
-                        "auto_enable_threshold": float(auto_val),
-                    })
                 self._status_label.setText(f"▶ 运行中 :{port}")
                 self._status_label.setStyleSheet("font-weight: 600; color: #38A169;")
                 self._toggle_btn.setText("⏹ 停止服务")
                 self._toggle_btn.setObjectName("danger_btn")
-                # 更新 URL 显示：开放模式显示本机 IP
-                if mode == "open":
-                    ips = self._get_local_ips()
-                    display_host = ips[0] if ips else "0.0.0.0"
-                else:
-                    display_host = "127.0.0.1"
+                ips = self._get_local_ips()
+                display_host = ips[0] if ips else "0.0.0.0"
                 self._url_label.setText(f"http://{display_host}:{port}/v1")
-                self._listen_mode_combo.setEnabled(False)
                 self._port_spin.setEnabled(False)
             else:
                 QMessageBox.warning(self, "启动失败", f"无法在端口 {port} 启动代理服务，可能端口已被占用")
@@ -2428,12 +2266,9 @@ class ApiProxyPage(QWidget):
     def _config_workbuddy(self, api_key: str):
         """一键配置 WorkBuddy 的 models.json（用户选择模型 + 增量写入）"""
         port = self._port_spin.value()
-        mode = self._listen_mode_combo.currentData() if hasattr(self, '_listen_mode_combo') else "local"
-        if mode == "open":
-            ips = self._get_local_ips()
-            host = ips[0] if ips else "0.0.0.0"
-        else:
-            host = "127.0.0.1"
+        mode = "open"
+        ips = self._get_local_ips()
+        host = ips[0] if ips else "0.0.0.0"
         base_url = f"http://{host}:{port}/v1"
 
         dlg = ModelSelectDialog("一键配置 WorkBuddy", base_url, self.SUPPORTED_CONFIG_MODELS, self)
@@ -2463,12 +2298,9 @@ class ApiProxyPage(QWidget):
     def _config_codebuddy(self, api_key: str):
         """一键配置 CodeBuddy 的 models.json（用户选择模型 + 增量写入）"""
         port = self._port_spin.value()
-        mode = self._listen_mode_combo.currentData() if hasattr(self, '_listen_mode_combo') else "local"
-        if mode == "open":
-            ips = self._get_local_ips()
-            host = ips[0] if ips else "0.0.0.0"
-        else:
-            host = "127.0.0.1"
+        mode = "open"
+        ips = self._get_local_ips()
+        host = ips[0] if ips else "0.0.0.0"
         base_url = f"http://{host}:{port}/v1"
 
         dlg = ModelSelectDialog("一键配置 CodeBuddy", base_url, self.SUPPORTED_CONFIG_MODELS, self)

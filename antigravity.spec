@@ -1,12 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Antigravity Tools - PyInstaller 打包配置
+"""Buddy Tool - PyInstaller 打包配置
 
 用法:
-    cd F:\自制工具\antigravity-tools
+    cd F:\自制工具\buddy-tool
     venv\Scripts\pyinstaller.exe antigravity.spec
 
 输出:
-    dist/Antigravity Tools/Antigravity Tools.exe  (目录模式，可分发)
+    dist/Buddy Tool/Buddy Tool.exe  (目录模式，可分发)
 """
 
 import os
@@ -180,7 +180,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Antigravity Tools',
+    name='Buddy Tool',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -203,5 +203,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Antigravity Tools',
+    name='Buddy Tool',
 )

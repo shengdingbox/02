@@ -278,7 +278,7 @@ class SettingsPage(QWidget):
 
     @staticmethod
     def _startup_app_name() -> str:
-        return "AntigravityTools"
+        return "BuddyTool"
 
     @staticmethod
     def _windows_startup_command() -> str:
@@ -312,7 +312,7 @@ class SettingsPage(QWidget):
             if sys.platform == "darwin":
                 plist_dir = os.path.expanduser("~/Library/LaunchAgents")
                 os.makedirs(plist_dir, exist_ok=True)
-                plist_path = os.path.join(plist_dir, "com.antigravity.tools.plist")
+                plist_path = os.path.join(plist_dir, "com.buddy.tool.plist")
                 if enable:
                     if getattr(sys, "frozen", False):
                         args = [sys.executable]
@@ -321,7 +321,7 @@ class SettingsPage(QWidget):
                         args = [sys.executable, "-m", "src.main"]
                         work_dir = SettingsPage._project_root()
                     plist_data = {
-                        "Label": "com.antigravity.tools",
+                        "Label": "com.buddy.tool",
                         "ProgramArguments": args,
                         "WorkingDirectory": work_dir,
                         "RunAtLoad": True,
@@ -349,7 +349,7 @@ class SettingsPage(QWidget):
                     value, _ = winreg.QueryValueEx(key, SettingsPage._startup_app_name())
                     return bool(str(value).strip())
             if sys.platform == "darwin":
-                plist_path = os.path.expanduser("~/Library/LaunchAgents/com.antigravity.tools.plist")
+                plist_path = os.path.expanduser("~/Library/LaunchAgents/com.buddy.tool.plist")
                 return os.path.exists(plist_path)
         except Exception:
             pass

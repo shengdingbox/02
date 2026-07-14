@@ -2,21 +2,21 @@
     "version": "1.6.3",
     "changelog": "1.增加导出功能\n2.新增卡密导入功能\n3.增加排序\n4.账号管理增加检测账号（支持高并发）\n5.修复账号管理删除账号后上游池不同步删除问题\n6.其他已知bug\n7.更新失败请至qq群下载1025605799",
     "release_date": "2026-07-06",
-    "download_url": "https://github.com/qinchangxv/antigravity-tools/releases/tag/v1.6.3",
+    "download_url": "https://github.com/qinchangxv/buddy-tool/releases/tag/v1.6.3",
     "sha256": "",
     "platforms": {
         "windows": {
             "version": "1.6.3",
             "changelog": "1.增加导出功能\n2.新增卡密导入功能\n3.增加排序\n4.账号管理增加检测账号（支持高并发）\n5.修复账号管理删除账号后上游池不同步删除问题\n6.其他已知bug\n7.更新失败请至qq群下载1025605799",
-            "download_url": "https://github.com/qinchangxv/antigravity-tools/releases/download/v1.6.3/Antigravity-Tools-Windows-x64.zip",
-            "src_download_url": "http://103.36.63.44:9680/Antigravity-Tools-v1.6.3-src.zip",
+            "download_url": "https://github.com/qinchangxv/buddy-tool/releases/download/v1.6.3/Buddy-Tool-Windows-x64.zip",
+            "src_download_url": "http://103.36.63.44:9680/Buddy-Tool-v1.6.3-src.zip",
             "sha256": ""
         },
         "mac": {
             "version": "1.6.3",
             "changelog": "1.增加导出功能\n2.新增卡密导入功能\n3.增加排序\n4.账号管理增加检测账号（支持高并发）\n5.修复账号管理删除账号后上游池不同步删除问题\n6.其他已知bug\n7.更新失败请至qq群下载1025605799",
-            "download_url": "https://github.com/qinchangxv/antigravity-tools/releases/tag/v1.6.3",
-            "src_download_url": "http://103.36.63.44:9680/Antigravity-Tools-v1.6.3-src.zip",
+            "download_url": "https://github.com/qinchangxv/buddy-tool/releases/tag/v1.6.3",
+            "src_download_url": "http://103.36.63.44:9680/Buddy-Tool-v1.6.3-src.zip",
             "sha256": ""
         }
     }

@@ -1,17 +1,22 @@
 """仪表盘页面 — 支持响应式缩放，窗口缩小时文字和UI同步缩小"""
 
+import logging
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame,
-    QPushButton, QButtonGroup, QApplication, QScrollArea
+    QPushButton, QButtonGroup, QApplication, QScrollArea, QSpinBox, QComboBox,
+    QMessageBox, QCheckBox
 )
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPalette
 
 from ...i18n import t
-from ...utils.store import load_accounts, load_setting
+from ...utils.store import load_accounts, load_setting, save_setting
 from ...models import AccountStatus
 from ...modules.proxy_server import ProxyDatabase
 from ..styles.theme import LIGHT_THEME, DARK_THEME
+
+logger = logging.getLogger(__name__)
 
 
 def _current_theme_colors() -> dict:
@@ -192,6 +197,7 @@ class DashboardPage(QWidget):
         self._colors = _current_theme_colors()
         self._scale = 1.0
         self._all_cards = []
+        self._proxy_page = None  # ApiProxyPage 引用，由 MainWindow 注入
         self._setup_ui()
 
     def _setup_ui(self):
@@ -228,16 +234,261 @@ class DashboardPage(QWidget):
 
         self._card_total = StatCard("总账号数", "--", "👥", "accent")
         self._card_active = StatCard("活跃账号", "--", "✅", "success")
-        self._card_checked = StatCard("今日已签到", "--", "🎯", "warning")
         self._card_quota = StatCard("总剩余积分", "--", "💎", "accent")
 
         grid.addWidget(self._card_total, 0, 0)
         grid.addWidget(self._card_active, 0, 1)
-        grid.addWidget(self._card_checked, 0, 2)
-        grid.addWidget(self._card_quota, 0, 3)
+        grid.addWidget(self._card_quota, 0, 2)
 
         content_layout.addLayout(grid)
         self._account_grid = grid
+
+        # === API 代理服务控制区 ===
+        self._proxy_control_card = QFrame()
+        self._proxy_control_card.setObjectName("proxy_control_card")
+        proxy_ctrl_layout = QVBoxLayout(self._proxy_control_card)
+        proxy_ctrl_layout.setSpacing(10)
+
+        # 端口和访问控制
+        proxy_config_row = QHBoxLayout()
+        proxy_config_row.addWidget(QLabel("端口:"))
+        self._port_spin = QSpinBox()
+        self._port_spin.setRange(1024, 65535)
+        self._port_spin.setValue(int(load_setting("proxy_port", "8002")))
+        self._port_spin.valueChanged.connect(lambda _: self._on_port_changed())
+        proxy_config_row.addWidget(self._port_spin)
+
+        proxy_config_row.addWidget(QLabel("  "))
+
+        self._proxy_status_label = QLabel("⏹ 已停止")
+        self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
+        proxy_config_row.addWidget(self._proxy_status_label)
+
+        self._toggle_proxy_btn = QPushButton("▶ 启动服务")
+        self._toggle_proxy_btn.setObjectName("primary_btn")
+        self._toggle_proxy_btn.setCursor(Qt.PointingHandCursor)
+        self._toggle_proxy_btn.setMinimumHeight(36)
+        self._toggle_proxy_btn.setMinimumWidth(100)
+        self._toggle_proxy_btn.clicked.connect(self._toggle_proxy_service)
+        self._apply_toggle_btn_style()
+        proxy_config_row.addWidget(self._toggle_proxy_btn)
+
+        proxy_config_row.addStretch()
+
+        proxy_ctrl_layout.addLayout(proxy_config_row)
+
+        # 服务 URL 显示
+        proxy_url_row = QHBoxLayout()
+        proxy_url_row.addWidget(QLabel("接口地址:"))
+        self._proxy_url_label = QLabel("http://127.0.0.1:8002/v1/chat/completions")
+        self._proxy_url_label.setStyleSheet("color: #2B6CB0; font-weight: 600; font-size: 13px;")
+        self._proxy_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        proxy_url_row.addWidget(self._proxy_url_label)
+
+        btn_copy_proxy_url = QPushButton("📋 复制")
+        btn_copy_proxy_url.setCursor(Qt.PointingHandCursor)
+        btn_copy_proxy_url.setFixedWidth(60)
+        btn_copy_proxy_url.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {self._colors['accent']};
+                border: 1px solid {self._colors['accent']};
+                border-radius: 6px;
+                padding: 6px 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['accent_light']};
+            }}
+        """)
+        btn_copy_proxy_url.clicked.connect(self._copy_proxy_url)
+        proxy_url_row.addWidget(btn_copy_proxy_url)
+
+        proxy_url_row.addStretch()
+        proxy_ctrl_layout.addLayout(proxy_url_row)
+
+        # 子 API Key 行
+        subkey_row = QHBoxLayout()
+        subkey_row.addWidget(QLabel("API Key:"))
+        self._subkey_label = QLabel("sk-")
+        self._subkey_label.setStyleSheet("color: #805AD5; font-weight: 600; font-size: 13px;")
+        self._subkey_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        subkey_row.addWidget(self._subkey_label)
+
+        btn_copy_subkey = QPushButton("📋 复制")
+        btn_copy_subkey.setCursor(Qt.PointingHandCursor)
+        btn_copy_subkey.setFixedWidth(60)
+        btn_copy_subkey.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {self._colors['accent']};
+                border: 1px solid {self._colors['accent']};
+                border-radius: 6px;
+                padding: 6px 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['accent_light']};
+            }}
+        """)
+        btn_copy_subkey.clicked.connect(self._copy_subkey)
+        subkey_row.addWidget(btn_copy_subkey)
+
+        btn_regen_subkey = QPushButton("🔄 重新生成")
+        btn_regen_subkey.setCursor(Qt.PointingHandCursor)
+        btn_regen_subkey.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self._colors['accent']};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 14px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['accent_hover']};
+            }}
+        """)
+        btn_regen_subkey.clicked.connect(self._regen_subkey)
+        subkey_row.addWidget(btn_regen_subkey)
+
+        subkey_row.addStretch()
+        proxy_ctrl_layout.addLayout(subkey_row)
+
+        # === 客户端配置（同一个 card 内） ===
+        import getpass
+        _username = getpass.getuser()
+
+        client_title = QLabel("选择目标客户端（可多选）")
+        client_title.setStyleSheet(
+            f"font-size: 13px; font-weight: 600; color: {self._colors['text_primary']};"
+        )
+        proxy_ctrl_layout.addWidget(client_title)
+
+        # 复选框样式 — 带对号
+        _chk_style = f"""
+            QCheckBox {{
+                color: {self._colors['text_primary']};
+                font-size: 13px;
+                spacing: 8px;
+                padding: 4px 0;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+                border: 2px solid {self._colors['border']};
+                border-radius: 4px;
+                background-color: transparent;
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {self._colors['accent']};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {self._colors['accent']};
+                border-color: {self._colors['accent']};
+                image: none;
+            }}
+        """
+
+        # WorkBuddy
+        self._chk_workbuddy = QCheckBox(f"WorkBuddy  腾讯代码助手桌面版  ✓ C:\\Users\\{_username}\\.workbuddy")
+        self._chk_workbuddy.setChecked(load_setting("config_target_workbuddy", "true") == "true")
+        self._chk_workbuddy.setStyleSheet(_chk_style)
+        proxy_ctrl_layout.addWidget(self._chk_workbuddy)
+
+        # CodeBuddy
+        self._chk_codebuddy = QCheckBox(f"CodeBuddy  腾讯云 AI IDE 插件  ✓ C:\\Users\\{_username}\\.codebuddy")
+        self._chk_codebuddy.setChecked(load_setting("config_target_codebuddy", "true") == "true")
+        self._chk_codebuddy.setStyleSheet(_chk_style)
+        proxy_ctrl_layout.addWidget(self._chk_codebuddy)
+
+        # 自动备份 + 打开备份目录
+        self._chk_auto_backup = QCheckBox("配置前自动备份原文件（推荐）")
+        self._chk_auto_backup.setChecked(load_setting("config_auto_backup", "true") == "true")
+        self._chk_auto_backup.setStyleSheet(_chk_style)
+
+        backup_row = QHBoxLayout()
+        backup_row.addWidget(self._chk_auto_backup)
+        backup_row.addStretch()
+        btn_open_backup = QPushButton("打开备份目录")
+        btn_open_backup.setCursor(Qt.PointingHandCursor)
+        btn_open_backup.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {self._colors['text_primary']};
+                border: 1px solid {self._colors['border']};
+                border-radius: 6px;
+                padding: 6px 14px;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['bg_hover']};
+            }}
+        """)
+        btn_open_backup.clicked.connect(self._open_backup_dir)
+        backup_row.addWidget(btn_open_backup)
+        proxy_ctrl_layout.addLayout(backup_row)
+
+        # 底部按钮：复制配置 / 删除配置 / 立即配置
+        action_row = QHBoxLayout()
+        action_row.addStretch()
+
+        btn_copy_config = QPushButton("复制配置")
+        btn_copy_config.setCursor(Qt.PointingHandCursor)
+        btn_copy_config.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self._colors['bg_secondary']};
+                color: {self._colors['text_primary']};
+                border: 1px solid {self._colors['border']};
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['bg_hover']};
+            }}
+        """)
+        btn_copy_config.clicked.connect(self._copy_config)
+        action_row.addWidget(btn_copy_config)
+
+        btn_delete_config = QPushButton("删除配置")
+        btn_delete_config.setCursor(Qt.PointingHandCursor)
+        btn_delete_config.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self._colors['bg_secondary']};
+                color: {self._colors['text_primary']};
+                border: 1px solid {self._colors['border']};
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['bg_hover']};
+            }}
+        """)
+        btn_delete_config.clicked.connect(self._delete_config)
+        action_row.addWidget(btn_delete_config)
+
+        btn_apply_config = QPushButton("立即配置")
+        btn_apply_config.setCursor(Qt.PointingHandCursor)
+        btn_apply_config.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self._colors['accent']};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 24px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['accent_hover']};
+            }}
+        """)
+        btn_apply_config.clicked.connect(self._apply_config)
+        action_row.addWidget(btn_apply_config)
+
+        proxy_ctrl_layout.addLayout(action_row)
+
+        content_layout.addWidget(self._proxy_control_card)
 
         # === 使用情况区域 ===
         self._usage_title = QLabel("📊 使用情况")
@@ -350,18 +601,6 @@ class DashboardPage(QWidget):
         cache_layout.addWidget(right_panel, 1)
         content_layout.addWidget(self._cache_frame)
 
-        # 签到状态分布
-        self._checkin_title = QLabel("🎯 签到状态")
-        self._checkin_title.setStyleSheet(
-            f"font-size: 16px; font-weight: 600; margin-top: 8px; color: {self._colors['text_primary']};"
-        )
-        content_layout.addWidget(self._checkin_title)
-
-        self._checkin_container = QWidget()
-        self._checkin_layout = QHBoxLayout(self._checkin_container)
-        self._checkin_layout.setSpacing(12)
-        content_layout.addWidget(self._checkin_container)
-
         content_layout.addStretch()
 
         self._scroll.setWidget(self._content)
@@ -372,7 +611,7 @@ class DashboardPage(QWidget):
 
         # 收集所有静态卡片用于缩放
         self._all_cards = [
-            self._card_total, self._card_active, self._card_checked, self._card_quota,
+            self._card_total, self._card_active, self._card_quota,
             self._usage_card_credits, self._usage_card_prompt, self._usage_card_completion,
             self._usage_card_total, self._usage_card_count,
         ]
@@ -400,12 +639,6 @@ class DashboardPage(QWidget):
         for card in self._all_cards:
             card.apply_scale(s)
 
-        # 缩放动态创建的签到卡片
-        for i in range(self._checkin_layout.count()):
-            item = self._checkin_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), StatCard):
-                item.widget().apply_scale(s)
-
         # 缩放环形图
         self._cache_chart.apply_scale(s)
 
@@ -416,9 +649,6 @@ class DashboardPage(QWidget):
 
         # 缩放区域标题
         self._usage_title.setStyleSheet(
-            f"font-size: {int(16 * s)}px; font-weight: 600; margin-top: 8px; color: {self._colors['text_primary']};"
-        )
-        self._checkin_title.setStyleSheet(
             f"font-size: {int(16 * s)}px; font-weight: 600; margin-top: 8px; color: {self._colors['text_primary']};"
         )
 
@@ -524,11 +754,8 @@ class DashboardPage(QWidget):
         for card in self._all_cards:
             card.apply_theme(self._colors)
 
-        # 签到状态卡片（动态创建的）
-        for i in range(self._checkin_layout.count()):
-            item = self._checkin_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), StatCard):
-                item.widget().apply_theme(self._colors)
+        # 刷新代理按钮样式
+        self._apply_toggle_btn_style()
 
         # 重新应用响应式缩放（会刷新所有带缩放的样式）
         self._apply_responsive_scale()
@@ -640,7 +867,6 @@ class DashboardPage(QWidget):
         # 统计卡片
         total = len(accounts)
         active = len([a for a in accounts if a.status == AccountStatus.ACTIVE])
-        checked = len([a for a in accounts if a.checkin.checked_today])
 
         # 计算总积分（仅统计已查询过的）
         has_queried = [a for a in accounts if a.quota.credits_total > 0]
@@ -648,28 +874,322 @@ class DashboardPage(QWidget):
 
         self._card_total.set_value(str(total))
         self._card_active.set_value(str(active))
-        self._card_checked.set_value(str(checked))
         if has_queried:
             self._card_quota.set_value(f"{total_credits:.0f}")
         else:
             self._card_quota.set_value("--")
 
-        # 签到状态分布
-        while self._checkin_layout.count():
-            item = self._checkin_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        unchecked_count = total - checked
-        self._checkin_layout.addWidget(StatCard("已签到", str(checked), "✅", "success"))
-        self._checkin_layout.addWidget(StatCard("未签到", str(unchecked_count), "⏳", "warning"))
-        self._checkin_layout.addStretch()
-
         # 刷新使用情况
         self._refresh_usage()
 
-        # 签到卡片创建后应用当前缩放
-        self._apply_responsive_scale()
+    def set_proxy_page(self, proxy_page):
+        """注入 ApiProxyPage 引用，用于服务控制"""
+        self._proxy_page = proxy_page
+
+    def _toggle_proxy_service(self):
+        """启动/停止代理服务 — 转发给 ApiProxyPage"""
+        if self._proxy_page:
+            self._proxy_page._toggle_service()
+            self._sync_proxy_status()
+
+    def _apply_toggle_btn_style(self):
+        """根据服务状态设置按钮内联样式"""
+        if not self._proxy_page:
+            return
+        ps = self._proxy_page._proxy_server
+        if ps and ps.is_running:
+            self._toggle_proxy_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {self._colors['error']};
+                    color: #FFFFFF;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 8px 16px;
+                    font-size: 13px;
+                    font-weight: 600;
+                }}
+                QPushButton:hover {{
+                    background-color: {self._colors['error']};
+                    opacity: 0.9;
+                }}
+            """)
+        else:
+            self._toggle_proxy_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {self._colors['accent']};
+                    color: #FFFFFF;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 8px 16px;
+                    font-size: 13px;
+                    font-weight: 600;
+                }}
+                QPushButton:hover {{
+                    background-color: {self._colors['accent_hover']};
+                }}
+            """)
+
+    def _copy_proxy_url(self):
+        """复制服务地址 — 转发给 ApiProxyPage"""
+        if self._proxy_page:
+            self._proxy_page._copy_url()
+        else:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(self._proxy_url_label.text())
+
+    def _copy_subkey(self):
+        """复制子 API Key"""
+        from PySide6.QtWidgets import QApplication
+        key = self._subkey_label.text()
+        if key and key != "sk-":
+            QApplication.clipboard().setText(key)
+
+    def _regen_subkey(self):
+        """重新生成子 API Key"""
+        if not self._proxy_page:
+            return
+        reply = QMessageBox.question(
+            self, "确认",
+            "重新生成后旧的 API Key 将失效，确定继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        import secrets as _sec
+        from datetime import datetime
+        db = self._proxy_page._db
+
+        # 删除旧的子 key，创建新的
+        for sk in db.get_sub_api_keys():
+            db.delete_sub_api_key(sk.get("key_id", ""))
+
+        new_key = f"sk-{_sec.token_urlsafe(32)}"
+        sub_key_data = {
+            "key_id": f"sk_{_sec.token_hex(4)}",
+            "api_key": new_key,
+            "label": "",
+            "is_active": True,
+            "allowed_models": [],
+            "allowed_key_ids": [],
+            "max_usage": 0,
+            "used_count": 0,
+            "rate_limit_rpm": 1000,
+            "key_mode": 1,
+            "created_at": datetime.now().isoformat(),
+        }
+        db.add_sub_api_key(sub_key_data)
+        self._proxy_page._invalidate_proxy_auth_cache()
+        self._refresh_subkey_display()
+
+    def _refresh_subkey_display(self):
+        """刷新子 API Key 显示"""
+        if not self._proxy_page:
+            return
+        sub_keys = self._proxy_page._db.get_sub_api_keys()
+        if sub_keys:
+            self._subkey_label.setText(sub_keys[0].get("api_key", "sk-"))
+        else:
+            self._subkey_label.setText("sk-（点击重新生成创建）")
+
+    def _open_backup_dir(self):
+        """打开备份目录"""
+        import os
+        from pathlib import Path
+        backup_dir = Path.home() / ".buddy-tool" / "config_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(backup_dir)) if hasattr(os, 'startfile') else None
+
+    def _save_client_config(self):
+        """保存客户端配置选项"""
+        save_setting("config_target_workbuddy", "true" if self._chk_workbuddy.isChecked() else "false")
+        save_setting("config_target_codebuddy", "true" if self._chk_codebuddy.isChecked() else "false")
+        save_setting("config_auto_backup", "true" if self._chk_auto_backup.isChecked() else "false")
+
+    def _build_config_json(self) -> str:
+        """根据当前端口、子 API Key 和 SUPPORTED_MODELS 生成配置 JSON"""
+        import json
+        from ...modules.proxy_server import SUPPORTED_MODELS, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS
+
+        port = self._port_spin.value()
+        sub_keys = self._proxy_page._db.get_sub_api_keys() if self._proxy_page else []
+        api_key = sub_keys[0].get("api_key", "") if sub_keys else ""
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+
+        # 模型名称映射
+        _name_map = {
+            "auto": "自动模式（智能选择）",
+            "deepseek-v4-pro": "DeepSeek V4 Pro",
+            "deepseek-v4-flash": "DeepSeek V4 Flash",
+            "deepseek-v3-2-volc": "DeepSeek V3.2",
+            "deepseek-v3-1": "DeepSeek V3.1",
+            "deepseek-v3-0324": "DeepSeek V3-0324",
+            "deepseek-r1": "DeepSeek R1",
+            "glm-5.2": "GLM-5.2",
+            "glm-5.1": "GLM-5.1",
+            "glm-5.0": "GLM-5.0",
+            "glm-5.0-turbo": "GLM-5.0 Turbo",
+            "glm-5v-turbo": "GLM-5v Turbo",
+            "glm-4.7": "GLM-4.7",
+            "glm-4.6": "GLM-4.6",
+            "minimax-m3": "MiniMax M3",
+            "minimax-m2.7": "MiniMax M2.7",
+            "minimax-m2.5": "MiniMax M2.5",
+            "kimi-k2.6": "Kimi K2.6",
+            "kimi-k2.5": "Kimi K2.5",
+            "kimi-k2.7": "Kimi K2.7",
+            "hy3": "Hy3",
+            "hy3-preview": "Hy3 Preview",
+            "hunyuan-chat": "Hunyuan Chat",
+            "hunyuan-2.0-thinking": "Hunyuan 2.0 Thinking",
+        }
+
+        models = []
+        for m in SUPPORTED_MODELS:
+            models.append({
+                "id": m,
+                "name": _name_map.get(m, m),
+                "vendor": "Buddy",
+                "apiKey": api_key,
+                "url": url,
+                "maxInputTokens": MODEL_CONTEXT_LENGTHS.get(m, 128000),
+                "maxOutputTokens": MODEL_MAX_OUTPUT_TOKENS.get(m, 8192),
+                "supportsToolCall": True,
+                "supportsImages": True,
+                "supportsReasoning": True,
+            })
+
+        return json.dumps({"models": models}, ensure_ascii=False, indent=2)
+
+    def _copy_config(self):
+        """复制配置 JSON 到剪贴板"""
+        self._save_client_config()
+        from PySide6.QtWidgets import QApplication
+        config_json = self._build_config_json()
+        QApplication.clipboard().setText(config_json)
+        QMessageBox.information(self, "复制成功", "配置 JSON 已复制到剪贴板")
+
+    def _delete_config(self):
+        """删除配置"""
+        self._save_client_config()
+        if not self._proxy_page:
+            return
+
+        targets = []
+        if self._chk_workbuddy.isChecked():
+            targets.append("WorkBuddy")
+        if self._chk_codebuddy.isChecked():
+            targets.append("CodeBuddy")
+
+        if not targets:
+            QMessageBox.warning(self, "提示", "请先选择要删除的目标客户端")
+            return
+
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除 {' + '.join(targets)} 的配置文件吗？\n\n删除后这些客户端将无法使用已配置的模型。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        if self._chk_workbuddy.isChecked() and hasattr(self._proxy_page, '_delete_workbuddy_config'):
+            try:
+                self._proxy_page._delete_workbuddy_config()
+            except Exception as e:
+                logger.error(f"删除 WorkBuddy 配置失败: {e}")
+        if self._chk_codebuddy.isChecked() and hasattr(self._proxy_page, '_delete_codebuddy_config'):
+            try:
+                self._proxy_page._delete_codebuddy_config()
+            except Exception as e:
+                logger.error(f"删除 CodeBuddy 配置失败: {e}")
+
+    def _apply_config(self):
+        """立即配置 — 生成 JSON 并写入所选客户端的 models.json"""
+        self._save_client_config()
+        if not self._proxy_page:
+            return
+
+        from pathlib import Path
+        import os
+        from datetime import datetime
+        from shutil import copy2
+
+        config_json = self._build_config_json()
+        success_clients = []
+
+        targets = []
+        if self._chk_workbuddy.isChecked():
+            targets.append(("WorkBuddy", Path.home() / ".workbuddy"))
+        if self._chk_codebuddy.isChecked():
+            targets.append(("CodeBuddy", Path.home() / ".codebuddy"))
+
+        if not targets:
+            QMessageBox.warning(self, "提示", "请先勾选目标客户端")
+            return
+
+        # 自动备份
+        if self._chk_auto_backup.isChecked():
+            backup_root = Path.home() / ".buddy-tool" / "config_backups"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for name, target_dir in targets:
+                src = target_dir / "models.json"
+                if src.exists():
+                    dst = backup_root / f"{name.lower()}_{ts}.json"
+                    try:
+                        copy2(str(src), str(dst))
+                    except Exception as e:
+                        logger.warning(f"备份 {name} 配置失败: {e}")
+
+        # 写入配置
+        for name, target_dir in targets:
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / "models.json"
+                target_path.write_text(config_json, encoding="utf-8")
+                success_clients.append(name)
+            except Exception as e:
+                logger.error(f"配置 {name} 失败: {e}")
+
+        if success_clients:
+            QMessageBox.information(
+                self, "配置完成",
+                f"已配置 {' + '.join(success_clients)}！\n请重启对应的客户端使配置生效。"
+            )
+
+    def _on_port_changed(self):
+        """端口变化时更新 URL 显示"""
+        port = self._port_spin.value()
+        if self._proxy_page:
+            ips = self._proxy_page._get_local_ips()
+        else:
+            ips = []
+        host = ips[0] if ips else "0.0.0.0"
+        self._proxy_url_label.setText(f"http://127.0.0.1:{port}/v1/chat/completions")
+
+    def _sync_proxy_status(self):
+        """从 ApiProxyPage 同步服务状态到仪表盘"""
+        if not self._proxy_page:
+            return
+        ps = self._proxy_page._proxy_server
+        if ps and ps.is_running:
+            port = self._port_spin.value()
+            ips = self._proxy_page._get_local_ips()
+            host = ips[0] if ips else "0.0.0.0"
+            self._proxy_status_label.setText(f"▶ 运行中 :{port}")
+            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #38A169;")
+            self._toggle_proxy_btn.setText("⏹ 停止服务")
+            self._port_spin.setEnabled(False)
+            self._proxy_url_label.setText(f"http://127.0.0.1:{port}/v1/chat/completions")
+        else:
+            self._proxy_status_label.setText("⏹ 已停止")
+            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
+            self._toggle_proxy_btn.setText("▶ 启动服务")
+            self._port_spin.setEnabled(True)
+        self._apply_toggle_btn_style()
 
     def showEvent(self, event):
         """页面显示时刷新数据并应用缩放"""
@@ -677,4 +1197,6 @@ class DashboardPage(QWidget):
         # 安全网：确保 QScrollArea viewport 背景跟随主题（Qt 内部可能重置 viewport palette）
         self._apply_scroll_background()
         self._apply_responsive_scale()
+        self._sync_proxy_status()
+        self._refresh_subkey_display()
         self._refresh_data()

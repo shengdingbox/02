@@ -221,6 +221,12 @@ def get_stylesheet(theme: str = "system") -> str:
         QFrame#card:hover {{
             border-color: {colors['accent']};
         }}
+        QFrame#proxy_control_card {{
+            background-color: {colors['bg_card']};
+            border: 1px solid {colors['border']};
+            border-radius: 12px;
+            padding: 16px;
+        }}
         QLabel#card_title {{
             color: {colors['text_primary']};
             font-size: 15px;

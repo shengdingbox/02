@@ -1,4 +1,4 @@
-"""Antigravity Tools - 多平台 IDE 工具管理器
+"""Buddy Tool - 多平台 IDE 工具管理器
 
 入口文件 - 使用 python -m src.main 运行
 """
@@ -31,7 +31,7 @@ def _setup_logging():
     date_fmt = "%H:%M:%S"
 
     if _is_gui_mode():
-        log_dir = os.path.join(os.path.expanduser("~"), ".antigravity-tools", "logs")
+        log_dir = os.path.join(os.path.expanduser("~"), ".buddy-tool", "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, "app.log")
         # RotatingFileHandler: 每个 2MB，保留 3 个
@@ -56,9 +56,8 @@ def _force_cleanup():
         # 注意：不杀 WorkBuddy！它是独立应用，关闭本软件不应影响它
         # 停止代理服务器
         try:
-            api_proxy_page = _main_window._pages.get("api_proxy")
-            if api_proxy_page:
-                api_proxy_page._cleanup()
+            if hasattr(_main_window, '_proxy_page') and _main_window._proxy_page:
+                _main_window._proxy_page._cleanup()
         except Exception:
             pass
 
@@ -82,7 +81,7 @@ def _check_single_instance() -> bool:
 
     # 尝试连接已有服务器
     socket = QLocalSocket()
-    socket.connectToServer("antigravity-tools-single-instance")
+    socket.connectToServer("buddy-tool-single-instance")
     socket.waitForConnected(500)
 
     if socket.state() == QLocalSocket.ConnectedState:
@@ -97,7 +96,7 @@ def _check_single_instance() -> bool:
     from PySide6.QtNetwork import QLocalServer
 
     _single_server = QLocalServer()
-    _single_server.listen("antigravity-tools-single-instance")
+    _single_server.listen("buddy-tool-single-instance")
 
     # 保存到全局以便 main() 中使用
     global _single_instance_server
@@ -130,14 +129,14 @@ def main():
     )
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Antigravity Tools")
-    app.setOrganizationName("Antigravity")
+    app.setApplicationName("Buddy Tool")
+    app.setOrganizationName("Buddy")
 
     # 单实例检查
     if not _check_single_instance():
-        logger.info("已有 Antigravity Tools 实例在运行，退出重复启动")
+        logger.info("已有 Buddy Tool 实例在运行，退出重复启动")
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.warning(None, "提示", "Antigravity Tools 已在运行中！\n如需使用，请在系统托盘或任务栏中找到已打开的窗口。")
+        QMessageBox.warning(None, "提示", "Buddy Tool 已在运行中！\n如需使用，请在系统托盘或任务栏中找到已打开的窗口。")
         sys.exit(0)
 
     # 设置默认字体（跨平台）
@@ -169,7 +168,7 @@ def main():
                     _main_window.raise_()
         _single_instance_server.newConnection.connect(_on_new_connection)
 
-    logger.info("Antigravity Tools 已启动")
+    logger.info("Buddy Tool 已启动")
 
     # 运行 Qt 事件循环
     ret = app.exec()

@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>nul
 echo ========================================
-echo   Antigravity Tools - 打包更新
+echo   Buddy Tool - 打包更新
 echo ========================================
 echo.
 
@@ -68,8 +68,8 @@ echo   SHA256: %SHA256%
 echo ========================================
 echo.
 echo 请将 update.zip 和 version.json 上传到服务器:
-echo   scp update.zip root@103.36.63.44:/var/www/html/antigravity-tools/
-echo   scp version.json root@103.36.63.44:/var/www/html/antigravity-tools/
+echo   scp update.zip root@103.36.63.44:/var/www/html/buddy-tool/
+echo   scp version.json root@103.36.63.44:/var/www/html/buddy-tool/
 echo.
 
 :: 询问是否自动上传
@@ -77,9 +77,9 @@ set /p UPLOAD="是否自动上传到服务器? (y/n): "
 if /i "%UPLOAD%"=="y" (
     echo.
     echo 上传 update.zip...
-    scp update.zip root@103.36.63.44:/var/www/html/antigravity-tools/
+    scp update.zip root@103.36.63.44:/var/www/html/buddy-tool/
     echo 上传 version.json...
-    scp version.json root@103.36.63.44:/var/www/html/antigravity-tools/
+    scp version.json root@103.36.63.44:/var/www/html/buddy-tool/
     echo.
     echo ✅ 上传完成!
 )

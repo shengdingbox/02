@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>nul
 echo ========================================
-echo   Antigravity Tools - 一键打包 EXE
+echo   Buddy Tool - 一键打包 EXE
 echo ========================================
 echo.
 
@@ -39,25 +39,25 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo   ✅ 打包成功！
-echo   输出目录: dist\Antigravity Tools\
-echo   EXE 文件: dist\Antigravity Tools\Antigravity Tools.exe
+echo   输出目录: dist\Buddy Tool\
+echo   EXE 文件: dist\Buddy Tool\Buddy Tool.exe
 echo   总大小:
 echo ========================================
 echo.
 
 :: 显示目录大小
-for /f %%A in ('dir /s "dist\Antigravity Tools" ^| findstr /c:"File(s)"') do echo %%A
+for /f %%A in ('dir /s "dist\Buddy Tool" ^| findstr /c:"File(s)"') do echo %%A
 
 echo.
-echo 可以将 dist\Antigravity Tools 整个目录打包成 zip 分发给用户
-echo 用户双击 Antigravity Tools.exe 即可运行，无需安装 Python
+echo 可以将 dist\Buddy Tool 整个目录打包成 zip 分发给用户
+echo 用户双击 Buddy Tool.exe 即可运行，无需安装 Python
 echo.
 
 :: 询问是否压缩成 zip
 set /p ZIP="是否压缩成 zip? (y/n): "
 if /i "%ZIP%"=="y" (
     echo 正在压缩...
-    venv\Scripts\python.exe -c "import zipfile,os;z=zipfile.ZipFile('dist/AntigravityTools.zip','w',zipfile.ZIP_DEFLATED);[z.write(os.path.join(r,f),os.path.join('Antigravity Tools',os.path.relpath(os.path.join(r,f),'dist/Antigravity Tools'))) for r,d,fs in os.walk('dist/Antigravity Tools') for f in fs];z.close();print('✅ 压缩完成: dist/AntigravityTools.zip')"
+    venv\Scripts\python.exe -c "import zipfile,os;z=zipfile.ZipFile('dist/BuddyTool.zip','w',zipfile.ZIP_DEFLATED);[z.write(os.path.join(r,f),os.path.join('Buddy Tool',os.path.relpath(os.path.join(r,f),'dist/Buddy Tool'))) for r,d,fs in os.walk('dist/Buddy Tool') for f in fs];z.close();print('✅ 压缩完成: dist/BuddyTool.zip')"
 )
 
 pause

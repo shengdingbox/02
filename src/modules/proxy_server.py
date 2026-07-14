@@ -34,6 +34,97 @@ from ..utils.store import load_setting
 
 logger = logging.getLogger(__name__)
 
+# ─── XXTEA 加密（Corrected Block TEA）—— 冷门可逆算法 ───
+# 用于 proxy_db.db 文件内容加密，纯 Python 实现，无外部依赖
+
+_XXTEA_KEY = b"AT-XTEA-2026"  # 固定密钥
+
+
+def _xxtea_mx(sum_: int, y: int, z: int, p: int, key: list) -> int:
+    """XXTEA 混淆函数"""
+    return (
+        (((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4))) ^
+        ((sum_ ^ y) + (key[(p & 3) ^ (sum_ & 3)] ^ z))
+    ) & 0xFFFFFFFF
+
+
+def _xxtea_encrypt_bytes(data: bytes, key: bytes) -> bytes:
+    """XXTEA 加密字节流"""
+    # 将 key 补齐到 16 字节
+    key = (key + b'\x00' * 16)[:16]
+    k = [int.from_bytes(key[i:i+4], 'little') for i in range(0, 16, 4)]
+
+    # 数据补齐到 4 字节倍数
+    pad_len = (4 - len(data) % 4) % 4
+    data += b'\x00' * pad_len
+    n = len(data) // 4
+    if n < 2:
+        # 不足 2 块时扩展到 2 块
+        data += b'\x00' * 4
+        n = 2
+
+    v = [int.from_bytes(data[i:i+4], 'little') for i in range(0, len(data), 4)]
+    DELTA = 0x9E3779B9
+    rounds = 6 + 52 // n
+    sum_ = 0
+    z = v[n - 1]
+    for _ in range(rounds):
+        sum_ = (sum_ + DELTA) & 0xFFFFFFFF
+        e = (sum_ >> 2) & 3
+        for p in range(n):
+            y = v[(p + 1) % n]
+            v[p] = (v[p] + _xxtea_mx(sum_, y, z, p, k)) & 0xFFFFFFFF
+            z = v[p]
+
+    return b''.join(vi.to_bytes(4, 'little') for vi in v)
+
+
+def _xxtea_decrypt_bytes(data: bytes, key: bytes) -> bytes:
+    """XXTEA 解密字节流"""
+    key = (key + b'\x00' * 16)[:16]
+    k = [int.from_bytes(key[i:i+4], 'little') for i in range(0, 16, 4)]
+
+    n = len(data) // 4
+    if n < 2:
+        return data
+
+    v = [int.from_bytes(data[i:i+4], 'little') for i in range(0, len(data), 4)]
+    DELTA = 0x9E3779B9
+    rounds = 6 + 52 // n
+    sum_ = (DELTA * rounds) & 0xFFFFFFFF
+    y = v[0]
+    for _ in range(rounds):
+        e = (sum_ >> 2) & 3
+        for p in range(n - 1, -1, -1):
+            z = v[(p - 1) % n]
+            v[p] = (v[p] - _xxtea_mx(sum_, y, z, p, k)) & 0xFFFFFFFF
+            y = v[p]
+        sum_ = (sum_ - DELTA) & 0xFFFFFFFF
+
+    return b''.join(vi.to_bytes(4, 'little') for vi in v)
+
+
+def _encrypt_json(data) -> str:
+    """将 Python 对象序列化为加密字符串（纯 Base64，无任何头部标记）"""
+    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    # 将原始长度（4 字节小端序）拼在数据前面，解密后据此裁剪 padding
+    orig_len_bytes = len(raw).to_bytes(4, 'little')
+    payload = orig_len_bytes + raw
+    encrypted = _xxtea_encrypt_bytes(payload, _XXTEA_KEY)
+    return base64.b64encode(encrypted).decode("ascii")
+
+
+def _decrypt_json(text: str):
+    """将加密字符串反序列化为 Python 对象"""
+    text = text.strip()
+    encrypted = base64.b64decode(text)
+    decrypted = _xxtea_decrypt_bytes(encrypted, _XXTEA_KEY)
+    # 前 4 字节是原始数据长度
+    orig_len = int.from_bytes(decrypted[:4], 'little')
+    raw = decrypted[4:4 + orig_len]
+    return json.loads(raw.decode("utf-8"))
+
+
 # ─── 上游代理地址（加密隐藏，用户在UI上看不到）───
 _OBFUSCATED_PROXY = base64.b64encode(
     b"aHR0cHM6Ly9jb3BpbG90LnRlbmNlbnQuY29tL3Yy"
@@ -1138,9 +1229,9 @@ class ProxyDatabase:
     def __init__(self, data_dir: str = ""):
         import os
         if not data_dir:
-            data_dir = os.path.expanduser("~/.antigravity-tools")
+            data_dir = os.path.expanduser("~/.buddy-tool")
         os.makedirs(data_dir, exist_ok=True)
-        self._db_path = os.path.join(data_dir, "proxy_db.json")
+        self._db_path = os.path.join(data_dir, "proxy_db.db")
         self._lock = threading.RLock()  # 可重入锁，避免 _save() 被已持锁的方法调用时死锁
         self._data = self._load()
         self._dirty = False  # 是否有未保存的变更
@@ -1169,18 +1260,19 @@ class ProxyDatabase:
                         import time
                         time.sleep(0.2 * (attempt + 1))
                         continue
-                    return json.loads(content)
+                    # 解密并反序列化（兼容旧版明文 JSON）
+                    return _decrypt_json(content)
             except (json.JSONDecodeError, ValueError) as e:
                 # JSON 解析失败（可能读到半截文件），等一下重试
-                logger.warning(f"[DB] proxy_db.json 读取失败(尝试 {attempt+1}/3): {e}")
+                logger.warning(f"[DB] proxy_db.db 读取失败(尝试 {attempt+1}/3): {e}")
                 import time
                 time.sleep(0.3 * (attempt + 1))
             except Exception as e:
-                logger.error(f"[DB] proxy_db.json 读取异常: {e}")
+                logger.error(f"[DB] proxy_db.db 读取异常: {e}")
                 import time
                 time.sleep(0.3 * (attempt + 1))
         # 重试 3 次都失败，说明文件确实损坏
-        logger.error("[DB] proxy_db.json 读取失败3次，返回空数据（可能需要恢复备份）")
+        logger.error("[DB] proxy_db.db 读取失败3次，返回空数据（可能需要恢复备份）")
         return {
             "upstream_keys": [],
             "sub_api_keys": [],
@@ -1206,8 +1298,9 @@ class ProxyDatabase:
                 return
             try:
                 tmp_path = self._db_path + ".tmp"
+                encrypted = _encrypt_json(self._data)
                 with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(self._data, f, ensure_ascii=False, indent=2)
+                    f.write(encrypted)
                 # 原子 rename（Windows 上 os.replace 是原子的）
                 os.replace(tmp_path, self._db_path)
                 self._dirty = False
@@ -2519,7 +2612,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if path in ("/", "/v1", "/v1/"):
             self._send_json(200, {
                 "object": "api.index",
-                "message": "Antigravity Proxy is running",
+                "message": "Buddy Proxy is running",
                 "version": "1.8.0",
             })
             return
@@ -2548,7 +2641,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                         "id": m,
                         "object": "model",
                         "created": int(time.time()),
-                        "owned_by": "antigravity-proxy",
+                        "owned_by": "buddy-proxy",
                         "supportsToolCall": True,
                         "supportsImages": _model_supports_images(m),
                         "supportsReasoning": True,

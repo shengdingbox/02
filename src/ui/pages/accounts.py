@@ -2,700 +2,204 @@
 
 import secrets
 import logging
-import urllib.request
 from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit,
-    QDialog, QFormLayout, QTextEdit, QFileDialog, QMessageBox,
-    QMenu, QSizePolicy, QAbstractItemView, QSpinBox, QProgressBar
+    QDialog, QTextEdit, QFileDialog, QMessageBox,
+    QMenu, QAbstractItemView, QSpinBox, QProgressBar
 )
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QAction, QCursor
+from PySide6.QtGui import QCursor
 
 from ...i18n import t
 from ...models import Account, Platform, AccountStatus, ResourcePackage
 from ...utils.store import load_accounts, save_account, delete_account, save_setting, load_setting
-from ...modules.oauth import WorkBuddyAuth
 from ...modules.api_client import ApiClient, check_api_key_chat_status
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 100  # 每页显示条数
 
-# CK 服务器配置（与积分查询项目共用）
-CK_SERVER_URL = "http://124.222.75.216:9658"
-CK_API_KEY = "ck_client_2026ok"
-
 
 class AddAccountDialog(QDialog):
-    """添加账号对话框"""
+    """添加账号对话框 — 卡密导入（单行）
+
+    只保留一个 apikey 输入框，昵称自动随机生成。
+    点击「导入」后自动保存账号、同步上游 Key 池、查询积分。
+    """
 
     account_added = Signal(Account)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("accounts.add_account"))
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(460)
+        self._query_thread = None
         self._setup_ui()
 
     def _setup_ui(self):
-        layout = QFormLayout(self)
+        layout = QVBoxLayout(self)
         layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
 
-        self._platform_combo = QComboBox()
-        for p in Platform:
-            self._platform_combo.addItem(p.value, p)
-        self._platform_combo.setVisible(False)
+        # 说明
+        hint = QLabel("输入 API Key (ck_xxx) 导入，昵称自动生成")
+        hint.setStyleSheet("color: #718096; font-size: 12px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
-        self._uid_input = QLineEdit()
-        self._uid_input.setPlaceholderText("UID (自动检测)")
-        layout.addRow("UID:", self._uid_input)
+        # API Key 输入框（单行）
+        self._input = QLineEdit()
+        self._input.setPlaceholderText("ck_xxx")
+        self._input.setMinimumHeight(36)
+        self._input.returnPressed.connect(self._do_import)
+        layout.addWidget(self._input)
 
-        self._nickname_input = QLineEdit()
-        self._nickname_input.setPlaceholderText("昵称 (自动检测)")
-        layout.addRow("昵称:", self._nickname_input)
-
-        self._token_input = QLineEdit()
-        self._token_input.setPlaceholderText("JWT Token (自动检测)")
-        layout.addRow("Token:", self._token_input)
-
+        # 状态标签
         self._status_label = QLabel("")
         self._status_label.setWordWrap(True)
         self._status_label.setStyleSheet("color: #9BA4B0; font-size: 12px;")
-        layout.addRow(self._status_label)
+        layout.addWidget(self._status_label)
 
-        # 第一行按钮：提取 + 从备份导入
-        btn_row1 = QHBoxLayout()
+        # 按钮行
+        btn_row = QHBoxLayout()
 
-        btn_extract = QPushButton("📥 提取当前账号")
-        btn_extract.setObjectName("secondary_btn")
-        btn_extract.setToolTip("从已登录的 WorkBuddy 中提取当前账号")
-        btn_extract.clicked.connect(self._extract_current)
-        btn_row1.addWidget(btn_extract)
-
-        btn_backup = QPushButton("📦 从备份导入")
-        btn_backup.setObjectName("secondary_btn")
-        btn_backup.setToolTip("从 WorkBuddy 账号管理器的备份中导入账号")
-        btn_backup.clicked.connect(self._import_from_backup)
-        btn_row1.addWidget(btn_backup)
-
-        layout.addRow(btn_row1)
-
-        # 第二行按钮：登录新账号 + 从服务器获取
-        btn_row2 = QHBoxLayout()
-
-        btn_login = QPushButton("🔐 登录新账号")
-        btn_login.setObjectName("secondary_btn")
-        btn_login.setToolTip("关闭WB → 注销SSO → 清除登录态 → 重启WB → 浏览器登录新账号")
-        btn_login.clicked.connect(self._login_new)
-        btn_row2.addWidget(btn_login)
-
-        btn_server = QPushButton("🌐 从服务器获取")
-        btn_server.setObjectName("secondary_btn")
-        btn_server.setToolTip("输入卡密从远程服务器获取账号 Token 和 API Key")
-        btn_server.clicked.connect(self._fetch_from_server)
-        btn_row2.addWidget(btn_server)
-
-        layout.addRow(btn_row2)
-
-        # 第三行按钮：用API导入
-        btn_row3 = QHBoxLayout()
-
-        btn_api = QPushButton("🔑 用API导入")
-        btn_api.setObjectName("secondary_btn")
-        btn_api.setToolTip("直接输入 API Key (ck_xxx) 导入账号")
-        btn_api.clicked.connect(self._import_from_api)
-        btn_row3.addWidget(btn_api)
-
-        btn_card = QPushButton("卡密导入")
-        btn_card.setObjectName("secondary_btn")
-        btn_card.setToolTip("粘贴格式：昵称----apikey，一行一个")
-        btn_card.clicked.connect(self._import_card_keys)
-        btn_row3.addWidget(btn_card)
-
-        layout.addRow(btn_row3)
-
-        # 第四行按钮：保存 + 取消
-        btn_row4 = QHBoxLayout()
-
-        btn_save = QPushButton("💾 保存")
-        btn_save.setObjectName("primary_btn")
-        btn_save.clicked.connect(self._save)
-        btn_row4.addWidget(btn_save)
+        self._btn_import = QPushButton("🚀 导入")
+        self._btn_import.setObjectName("primary_btn")
+        self._btn_import.setCursor(Qt.PointingHandCursor)
+        self._btn_import.setMinimumHeight(36)
+        self._btn_import.clicked.connect(self._do_import)
+        btn_row.addWidget(self._btn_import)
 
         btn_cancel = QPushButton(t("common.cancel"))
         btn_cancel.setObjectName("secondary_btn")
+        btn_cancel.setCursor(Qt.PointingHandCursor)
+        btn_cancel.setMinimumHeight(36)
         btn_cancel.clicked.connect(self.reject)
-        btn_row4.addWidget(btn_cancel)
+        btn_row.addWidget(btn_cancel)
 
-        layout.addRow(btn_row4)
+        btn_row.addStretch()
 
-    def _extract_current(self):
-        """从当前 WorkBuddy 会话提取账号"""
-        self._status_label.setText("⏳ 正在提取当前账号...")
-        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+        layout.addLayout(btn_row)
 
-        result = WorkBuddyAuth.extract_current_session()
-        if result:
-            self._token_input.setText(result.get("neodata_token", "") or result.get("access_token", ""))
-            self._uid_input.setText(result.get("uid", ""))
-            self._nickname_input.setText(result.get("nickname", ""))
-            source = result.get("source", "")
-            phone = result.get("phone_number", "")
-            status_text = f"✅ 已提取: {result.get('nickname', '未知')}"
-            if phone:
-                status_text += f" (手机: {phone})"
-            if source:
-                status_text += f"\n来源: {source}"
-            self._status_label.setText(status_text)
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-        else:
-            self._status_label.setText(
-                "❌ 当前 WorkBuddy 未登录。\n"
-                "请先在 WorkBuddy 中登录账号，或点击「从备份导入」导入已有账号，\n"
-                "或点击「登录新账号」通过浏览器登录。"
-            )
-            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-
-    def _import_from_backup(self):
-        """从 WorkBuddy 账号管理器的备份中导入账号"""
-        import json
-        import os
-
-        self._status_label.setText("⏳ 正在扫描备份...")
-        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-        from ...modules.oauth import CODEBUDDY_EXT_AUTH_DIR, WORKBUDDY_DESKTOP_INFO
-
-        backups = []
-
-        # === 来源1：新版 workbuddy-desktop.*.info 备份文件 ===
-        auth_dir = CODEBUDDY_EXT_AUTH_DIR
-        if os.path.exists(auth_dir):
-            for fname in sorted(os.listdir(auth_dir), reverse=True):
-                if fname.startswith("workbuddy-desktop.") and fname.endswith(".info"):
-                    fpath = os.path.join(auth_dir, fname)
-                    ts_str = fname.replace("workbuddy-desktop.", "").replace(".info", "")
-                    label = f"📦 {ts_str}"
-                    try:
-                        with open(fpath, "r", encoding="utf-8") as f:
-                            info = json.load(f)
-                        access_token = info.get("auth", {}).get("accessToken", "")
-                        if access_token:
-                            account = info.get("account", {})
-                            nickname = account.get("nickname", "")
-                            if nickname:
-                                label = f"📦 {ts_str} ({nickname})"
-                            backups.append((label, fpath, "desktop_info"))
-                    except Exception:
-                        pass
-
-        # === 来源2：旧版 account_manager/backups 目录 ===
-        backup_base = os.path.expanduser("~/.workbuddy/account_manager/backups")
-        if not os.path.exists(backup_base):
-            backup_base = os.path.expanduser("~/.workbuddy/backup")
-
-        if os.path.exists(backup_base):
-            for name in sorted(os.listdir(backup_base), reverse=True):
-                backup_dir = os.path.join(backup_base, name)
-                if not os.path.isdir(backup_dir):
-                    continue
-                token_file = os.path.join(backup_dir, "neodata_token")
-                meta_file = os.path.join(backup_dir, "_meta.json")
-                label = name
-                has_token = os.path.exists(token_file)
-
-                if os.path.exists(meta_file):
-                    try:
-                        with open(meta_file, "r", encoding="utf-8") as f:
-                            meta = json.load(f)
-                        label = meta.get("label", name)
-                        created = meta.get("created_at", 0)
-                        if created:
-                            import time
-                            label = f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(created))} - {label}"
-                    except Exception:
-                        pass
-
-                if has_token:
-                    backups.append((f"📁 {label}", token_file, "neodata_token"))
-
-        if not backups:
-            self._status_label.setText("❌ 未找到含有 token 的备份。请先在 WorkBuddy 中登录账号。")
-            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-            return
-
-        # 如果只有一个备份，直接导入
-        if len(backups) == 1:
-            label, path, btype = backups[0]
-            if btype == "desktop_info":
-                self._load_desktop_info_backup(path)
-            else:
-                self._load_backup_token(path)
-            return
-
-        # 多个备份，弹出选择对话框
-        dialog = QDialog(self)
-        dialog.setWindowTitle("选择备份")
-        dialog.setMinimumWidth(400)
-        dialog_layout = QVBoxLayout(dialog)
-
-        dialog_layout.addWidget(QLabel(f"找到 {len(backups)} 个含 token 的备份，请选择："))
-
-        from PySide6.QtWidgets import QListWidget
-        list_widget = QListWidget()
-        for label, path, btype in backups:
-            list_widget.addItem(label)
-        list_widget.setCurrentRow(0)
-        dialog_layout.addWidget(list_widget)
-
-        btn_box = QHBoxLayout()
-        btn_ok = QPushButton("导入")
-        btn_ok.setObjectName("primary_btn")
-        btn_ok.clicked.connect(dialog.accept)
-        btn_cancel_bk = QPushButton("取消")
-        btn_cancel_bk.clicked.connect(dialog.reject)
-        btn_box.addWidget(btn_ok)
-        btn_box.addWidget(btn_cancel_bk)
-        dialog_layout.addLayout(btn_box)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            idx = list_widget.currentRow()
-            if idx >= 0:
-                label, path, btype = backups[idx]
-                if btype == "desktop_info":
-                    self._load_desktop_info_backup(path)
-                else:
-                    self._load_backup_token(path)
-
-    def _load_desktop_info_backup(self, info_path: str):
-        """从 workbuddy-desktop.*.info 备份文件加载账号信息"""
-        import json
-        import os
-        import time
-
-        try:
-            with open(info_path, "r", encoding="utf-8") as f:
-                info = json.load(f)
-
-            account = info.get("account", {})
-            auth = info.get("auth", {})
-            access_token = auth.get("accessToken", "")
-
-            if not access_token:
-                self._status_label.setText("❌ 备份文件中 accessToken 为空")
-                self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-                return
-
-            from ...modules.oauth import decode_jwt
-            payload = decode_jwt(access_token)
-            sub = payload.get("sub", "")
-            username = payload.get("preferred_username", "")
-            exp = payload.get("exp", 0)
-
-            uid = account.get("uid", sub)
-            nickname = account.get("nickname", username)
-            phone = account.get("phoneNumber", "")
-
-            self._token_input.setText(access_token)
-            self._uid_input.setText(uid)
-            self._nickname_input.setText(nickname)
-
-            if exp and exp < time.time():
-                self._status_label.setText(
-                    f"⚠️ 已导入: {nickname}（Token 已过期，需要重新登录）\n"
-                    f"手机号: {phone}"
-                )
-                self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-            else:
-                self._status_label.setText(
-                    f"✅ 已导入: {nickname} (手机: {phone or '未记录'})"
-                )
-                self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-
-        except Exception as e:
-            self._status_label.setText(f"❌ 读取备份失败: {e}")
-            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-
-    def _load_backup_token(self, token_file: str):
-        """从备份 token 文件加载账号信息"""
-        import json
-        import os
-
-        try:
-            with open(token_file, "r", encoding="utf-8") as f:
-                token = f.read().strip()
-
-            if not token:
-                self._status_label.setText("❌ 备份 token 为空")
-                self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-                return
-
-            from ...modules.oauth import decode_jwt
-            payload = decode_jwt(token)
-            sub = payload.get("sub", "")
-            username = payload.get("preferred_username", "")
-            exp = payload.get("exp", 0)
-
-            self._token_input.setText(token)
-            self._uid_input.setText(sub)
-            self._nickname_input.setText(username)
-
-            import time
-            if exp and exp < time.time():
-                self._status_label.setText(
-                    f"⚠️ 已导入: {username}（Token 已过期，需要重新登录）"
-                )
-                self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-            else:
-                self._status_label.setText(f"✅ 已导入: {username}")
-                self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-
-        except Exception as e:
-            self._status_label.setText(f"❌ 读取备份失败: {e}")
-            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-
-    def _fetch_from_server(self):
-        """从远程服务器通过卡密批量获取账号 — 打开专用对话框"""
-        dialog = ServerFetchDialog(self)
-        dialog.accounts_imported.connect(self._on_batch_accounts_imported)
-        dialog.exec()
-
-    def _import_from_api(self):
-        """用 API Key (ck_xxx) 直接导入账号 — 弹自定义对话框输入 Key + 昵称 + UID"""
-        from PySide6.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QVBoxLayout
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("🔑 用API导入")
-        dialog.setMinimumWidth(450)
-        dlg_layout = QVBoxLayout(dialog)
-        form = QFormLayout()
-        form.setSpacing(12)
-
-        key_input = QLineEdit()
-        key_input.setPlaceholderText("ck_xxx 格式")
-        key_input.setMinimumWidth(350)
-        form.addRow("API Key *:", key_input)
-
-        nickname_input = QLineEdit()
-        nickname_input.setPlaceholderText("用于显示（如手机号）")
-        form.addRow("昵称 *:", nickname_input)
-
-        uid_input = QLineEdit()
-        uid_input.setPlaceholderText("账号唯一标识（如手机号）")
-        form.addRow("UID *:", uid_input)
-
-        dlg_layout.addLayout(form)
-
-        hint = QLabel("提示：输入 API Key 后会自动验证并查积分，昵称和 UID 必填")
-        hint.setStyleSheet("color: #9BA4B0; font-size: 12px;")
-        hint.setWordWrap(True)
-        dlg_layout.addWidget(hint)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
-            parent=dialog
-        )
-        btn_ok = buttons.button(QDialogButtonBox.Ok)
-        btn_ok.setText("验证并导入")
-        btn_ok.setObjectName("primary_btn")
-        btn_cancel = buttons.button(QDialogButtonBox.Cancel)
-        btn_cancel.setText(t("common.cancel"))
-        btn_cancel.setObjectName("secondary_btn")
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        dlg_layout.addWidget(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
-            return
-
-        api_key = key_input.text().strip()
-        nickname = nickname_input.text().strip()
-        uid = uid_input.text().strip()
-
+    def _do_import(self):
+        """解析 API Key 并导入"""
+        api_key = self._input.text().strip()
         if not api_key:
             QMessageBox.warning(self, t("common.warning"), "请输入 API Key")
             return
-        if not api_key.startswith("ck_"):
-            QMessageBox.warning(self, t("common.warning"), "API Key 应以 ck_ 开头")
-            return
-        if not nickname or not uid:
-            QMessageBox.warning(self, t("common.warning"), "昵称和 UID 必填")
-            return
 
-        self._status_label.setText("⏳ 正在验证 API Key...")
-        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+        # 随机生成昵称
+        nickname = f"账号_{secrets.token_hex(4)}"
 
-        # 用 API Key 查分验证有效性
-        remaining = 0
-        total = 0
-        try:
-            from ...modules.api_client import ApiClient
-            client = ApiClient.from_api_key(api_key)
-            result = client.get_user_resource()
-            if result and result.get("success"):
-                remaining = result.get("remaining_credits", 0)
-                total = result.get("total_credits", 0)
-        except Exception as e:
-            self._status_label.setText(f"⚠️ 验证失败: {e}（仍可保存）")
-            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-        # 填充表单
-        self._token_input.setText(api_key)
-        self._uid_input.setText(uid)
-        self._nickname_input.setText(nickname)
-
-        # 同步导入到上游 Key 池（立即写盘）
-        try:
-            from ...modules.proxy_server import ProxyDatabase
-            proxy_db = ProxyDatabase.get_instance()
-            existing = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-            if api_key not in existing:
-                import secrets as _sec
-                proxy_db.add_upstream_key({
-                    "key_id": f"ck_{_sec.token_hex(4)}",
-                    "api_key": api_key,
-                    "label": uid,
-                    "status": "active",
-                    "points": f"{remaining:.0f}/{total:.0f}" if total > 0 else "",
-                    "points_updated_at": "",
-                    "packages": [],
-                    "created_at": "",
-                })
-                proxy_db._dirty = True
-                proxy_db._flush_to_disk()
-        except Exception:
-            pass
-
-        status = f"✅ API Key 已验证: {nickname} ({uid})"
-        if total > 0:
-            status += f"  积分: {remaining:.0f}/{total:.0f}"
-        status += "\n已填充表单并导入上游Key池，点击「保存」完成"
-        self._status_label.setText(status)
-        self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-
-    def _import_card_keys(self):
-        """粘贴卡密批量导入，格式：昵称----apikey。"""
-        from PySide6.QtWidgets import QDialogButtonBox, QVBoxLayout
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("卡密导入")
-        dialog.setMinimumSize(520, 360)
-        dlg_layout = QVBoxLayout(dialog)
-
-        hint = QLabel("每行一个账号，格式：昵称----apikey")
-        hint.setStyleSheet("color: #9BA4B0; font-size: 12px;")
-        dlg_layout.addWidget(hint)
-
-        text_edit = QTextEdit()
-        text_edit.setPlaceholderText("张三----ck_xxx\n李四----ck_xxx")
-        dlg_layout.addWidget(text_edit, 1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
-        buttons.button(QDialogButtonBox.Ok).setText("导入")
-        buttons.button(QDialogButtonBox.Cancel).setText(t("common.cancel"))
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        dlg_layout.addWidget(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
-            return
-
-        accounts = []
-        invalid = []
-        for line_no, raw_line in enumerate(text_edit.toPlainText().splitlines(), start=1):
-            line = raw_line.strip()
-            if not line:
-                continue
-            if "----" not in line:
-                invalid.append(str(line_no))
-                continue
-            nickname, api_key = [part.strip() for part in line.split("----", 1)]
-            if not nickname or not api_key:
-                invalid.append(str(line_no))
-                continue
-            accounts.append({
-                "uid": nickname,
-                "nickname": nickname,
-                "auth_token": api_key,
-                "api_key": api_key,
-                "ck": "",
-                "platform": Platform.CODEBUDDY,
-            })
-
-        if not accounts:
-            QMessageBox.warning(self, t("common.warning"), "没有可导入的卡密，请检查格式：昵称----apikey")
-            return
-
-        if invalid:
-            reply = QMessageBox.question(
-                self,
-                "格式提醒",
-                f"有 {len(invalid)} 行格式不正确，将跳过这些行并继续导入吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-        self._on_batch_accounts_imported(accounts)
-        QMessageBox.information(self, "导入完成", f"已导入 {len(accounts)} 个账号")
-
-    def _on_batch_accounts_imported(self, accounts: list):
-        """批量导入回调：保存所有账号并通知刷新，同时自动导入到上游Key池"""
-        if not accounts:
-            self._status_label.setText("⚠️ 没有可导入的账号")
-            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-            return
-
-        key_pool_count = 0
-
-        # 1. 批量导入到上游Key池（一次写磁盘）
-        try:
-            from ...modules.proxy_server import ProxyDatabase
-            proxy_db = ProxyDatabase.get_instance()
-            existing_keys = proxy_db.get_upstream_keys()
-            existing_api_keys = {k.get("api_key", "") for k in existing_keys}
-
-            for acc_data in accounts:
-                api_key = acc_data.get("api_key", "") or acc_data.get("auth_token", "")
-                if api_key and api_key not in existing_api_keys:
-                    # 尝试从导入数据的积分信息初始化 points
-                    points_str = ""
-                    points_updated = ""
-                    remaining = acc_data.get("credits_remaining", 0)
-                    total = acc_data.get("credits_total", 0)
-                    if total > 0:
-                        points_str = f"{remaining:.0f}/{total:.0f}"
-                        points_updated = "imported"
-                    key_data = {
-                        "key_id": f"ck_{secrets.token_hex(4)}",
-                        "api_key": api_key,
-                        "label": acc_data.get("nickname", "") or acc_data.get("uid", ""),
-                        "status": "active",
-                        "used_count": 0,
-                        "points": points_str,
-                        "points_updated_at": points_updated,
-                        "created_at": datetime.now().isoformat(),
-                    }
-                    proxy_db.add_upstream_key(key_data)
-                    existing_api_keys.add(api_key)
-                    key_pool_count += 1
-        except Exception:
-            pass  # Key池导入失败不影响账号导入
-
-        # 2. 保存账号到数据库
-        count = 0
-        last_account = None
-        for acc_data in accounts:
-            account = Account(
-                uid=acc_data.get("uid", ""),
-                nickname=acc_data.get("nickname", ""),
-                platform=acc_data.get("platform", Platform.CODEBUDDY),
-                auth_token=acc_data.get("auth_token", ""),
-                domain=acc_data.get("domain", "www.codebuddy.cn"),
-                ck=acc_data.get("ck", ""),
-                api_key=acc_data.get("api_key", ""),
-            )
-            if acc_data.get("quota"):
-                account.quota = acc_data["quota"]
-            save_account(account)
-            last_account = account
-            count += 1
-
-        if count > 0:
-            msg = f"✅ 已导入 {count} 个账号"
-            if key_pool_count > 0:
-                msg += f"\n🔑 已同步 {key_pool_count} 个 Key 到上游 Key 池"
-            self._status_label.setText(msg)
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-            # 通知父页面 AccountsPage 刷新表格
-            self.account_added.emit(last_account)
-        else:
-            self._status_label.setText("⚠️ 没有可导入的账号")
-            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-    def _login_new(self):
-        """通过 WorkBuddy 浏览器登录新账号"""
-        from PySide6.QtCore import QThread, Signal as QSignal
-        from ...modules.oauth import WorkBuddyProcess
-
-        if WorkBuddyProcess.is_running():
-            reply = QMessageBox.question(
-                self, "需要关闭 WorkBuddy",
-                "登录新账号需要：\n\n"
-                "1. 关闭 WorkBuddy\n"
-                "2. 注销浏览器 SSO 会话\n"
-                "3. 清除所有登录数据\n"
-                "4. 重启 WorkBuddy 让你登录新账号\n\n"
-                "WorkBuddy 关闭后会自动重启，你确定继续吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-
-        self._status_label.setText("⏳ 正在关闭 WorkBuddy 并准备登录...")
-        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
-
-        class LoginThread(QThread):
-            result_ready = QSignal(object)
-            status_update = QSignal(str)
-
-            def run(self):
-                result = WorkBuddyAuth.login_new_account(
-                    on_status=lambda s: self.status_update.emit(s),
-                    timeout=300,
-                )
-                self.result_ready.emit(result)
-
-        self._login_thread = LoginThread()
-        self._login_thread.result_ready.connect(self._on_login_result)
-        self._login_thread.status_update.connect(self._on_status_update)
-        self._login_thread.start()
-
-    def _on_status_update(self, status_text: str):
-        """登录流程状态更新"""
-        self._status_label.setText(f"⏳ {status_text}")
-        if "❌" in status_text:
-            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-        elif "✅" in status_text:
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-        else:
-            self._status_label.setStyleSheet("color: #2B6CB0; font-size: 12px;")
-
-    def _on_login_result(self, result):
-        """登录结果回调"""
-        if result:
-            self._token_input.setText(result.get("neodata_token", "") or result.get("access_token", ""))
-            self._uid_input.setText(result.get("uid", ""))
-            self._nickname_input.setText(result.get("nickname", ""))
-            self._status_label.setText(f"✅ 登录成功: {result.get('nickname', '新账号')}")
-            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
-        else:
-            self._status_label.setText("❌ 登录超时或失败，请重试")
-            self._status_label.setStyleSheet("color: #E53E3E; font-size: 12px;")
-
-    def _save(self):
-        """保存账号"""
-        if not self._token_input.text() and not self._uid_input.text():
-            QMessageBox.warning(self, t("common.warning"), "请先提取或登录账号")
-            return
-
-        token = self._token_input.text()
-        # 如果 token 以 ck_ 开头，说明是 API Key，同时填到 api_key 字段
-        api_key = token if token.startswith("ck_") else ""
-
+        # 1. 保存账号到数据库
         account = Account(
-            uid=self._uid_input.text() or f"user_{id(self)}",
-            nickname=self._nickname_input.text(),
-            platform=self._platform_combo.currentData(),
-            auth_token=token,
+            uid=nickname,
+            nickname=nickname,
+            platform=Platform.CODEBUDDY,
+            auth_token=api_key,
+            domain="www.codebuddy.cn",
+            ck="",
             api_key=api_key,
         )
         save_account(account)
+
+        # 2. 同步上游 Key 池
+        key_pool_added = False
+        try:
+            from ...modules.proxy_server import ProxyDatabase
+            proxy_db = ProxyDatabase.get_instance()
+            existing_api_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
+            if api_key not in existing_api_keys:
+                proxy_db.add_upstream_key({
+                    "key_id": f"ck_{secrets.token_hex(4)}",
+                    "api_key": api_key,
+                    "label": nickname,
+                    "status": "active",
+                    "used_count": 0,
+                    "points": "",
+                    "points_updated_at": "",
+                    "created_at": datetime.now().isoformat(),
+                })
+                key_pool_added = True
+        except Exception:
+            pass
+
+        # 3. 通知刷新
         self.account_added.emit(account)
+
+        # 4. 查询积分
+        self._btn_import.setEnabled(False)
+        self._status_label.setText("⏳ 正在查询积分...")
+        self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+
+        from PySide6.QtCore import QThread, Signal as QSignal
+
+        class QuotaQueryThread(QThread):
+            done = QSignal(object, object)  # (account, result_dict)
+
+            def __init__(self, acc):
+                super().__init__()
+                self._acc = acc
+
+            def run(self):
+                try:
+                    client = ApiClient.from_api_key(self._acc.api_key)
+                    result = client.get_user_resource()
+                except Exception as e:
+                    result = {"success": False, "error": str(e)}
+                self.done.emit(self._acc, result)
+
+        self._query_thread = QuotaQueryThread(account)
+        self._query_thread.done.connect(
+            lambda acc, result: self._on_quota_done(acc, result, key_pool_added)
+        )
+        self._query_thread.start()
+
+    def _on_quota_done(self, account: Account, result: dict, key_pool_added: bool):
+        """积分查询完成"""
+        self._btn_import.setEnabled(True)
+
+        if result.get("success"):
+            remaining = result.get("remaining_credits", 0)
+            total = result.get("total_credits", 0)
+            packages = result.get("packages", [])
+
+            account.quota.credits_remaining = remaining
+            account.quota.credits_total = total
+            account.quota.packages = packages
+            account.quota.last_updated = datetime.now()
+            save_account(account)
+
+            # 同步上游 Key 池积分
+            try:
+                from ...modules.proxy_server import ProxyDatabase
+                db = ProxyDatabase.get_instance()
+                db.sync_quota_to_key(
+                    api_key_or_token=account.api_key or account.auth_token,
+                    remaining_credits=remaining,
+                    total_credits=total,
+                    packages=packages,
+                )
+            except Exception:
+                pass
+
+            msg = f"✅ 已导入: {account.nickname}"
+            if key_pool_added:
+                msg += "\n🔑 已同步到上游 Key 池"
+            msg += f"\n💎 积分: {remaining:.0f}/{total:.0f}"
+            self._status_label.setText(msg)
+            self._status_label.setStyleSheet("color: #38A169; font-size: 12px;")
+        else:
+            msg = f"✅ 已导入: {account.nickname}"
+            if key_pool_added:
+                msg += "\n🔑 已同步到上游 Key 池"
+            msg += f"\n⚠️ 积分查询失败: {result.get('error', '未知')}"
+            self._status_label.setText(msg)
+            self._status_label.setStyleSheet("color: #D69E2E; font-size: 12px;")
+
+        # 完成
         self.accept()
 
 
@@ -877,20 +381,6 @@ class AccountsPage(QWidget):
 
         toolbar = QHBoxLayout()
 
-        # 平台筛选
-        self._filter_combo = QComboBox()
-        self._filter_combo.addItem("全部平台", None)
-        for p in Platform:
-            self._filter_combo.addItem(p.value, p)
-        self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
-        self._filter_combo.setVisible(False)
-
-        # 搜索框
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("🔍 搜索账号...")
-        self._search_input.textChanged.connect(self._on_filter_changed)
-        toolbar.addWidget(self._search_input)
-
         toolbar.addStretch()
 
         # 批量删除按钮
@@ -915,37 +405,17 @@ class AccountsPage(QWidget):
         btn_add.clicked.connect(self._add_account)
         toolbar.addWidget(btn_add)
 
-        btn_import = QPushButton(f"📥 {t('accounts.import_batch')}")
-        btn_import.setObjectName("secondary_btn")
-        btn_import.setCursor(Qt.PointingHandCursor)
-        btn_import.clicked.connect(self._import_batch)
-        toolbar.addWidget(btn_import)
-
-        # 并发数设置
-        toolbar.addWidget(QLabel("并发数:"))
-        self._concurrency_spin = QSpinBox()
-        self._concurrency_spin.setRange(1, 50)
-        self._concurrency_spin.setValue(int(load_setting("account_concurrency", "5")))
-        self._concurrency_spin.setToolTip("同时请求线程数，范围 1-50")
-        self._concurrency_spin.valueChanged.connect(
-            lambda value: save_setting("account_concurrency", str(value))
-        )
-        self._concurrency_spin.setFixedWidth(80)
-        toolbar.addWidget(self._concurrency_spin)
-
+        # 查询全部积分按钮
         self._btn_query_all = QPushButton("💎 查询全部积分")
         self._btn_query_all.setObjectName("primary_btn")
         self._btn_query_all.setCursor(Qt.PointingHandCursor)
         self._btn_query_all.clicked.connect(self._query_all_quotas)
         toolbar.addWidget(self._btn_query_all)
 
-        # 检查账号状态按钮
+        # 检查账号状态按钮（保留引用但不显示）
         self._btn_check_status = QPushButton("🔍 检查账号状态")
         self._btn_check_status.setObjectName("secondary_btn")
-        self._btn_check_status.setCursor(Qt.PointingHandCursor)
-        self._btn_check_status.setToolTip("批量检测所有账号的 API Key 是否被风控/失效，结果同步到上游 Key 池")
-        self._btn_check_status.clicked.connect(self._check_all_status)
-        toolbar.addWidget(self._btn_check_status)
+        self._btn_check_status.setVisible(False)
 
         # 停止按钮
         self._btn_stop_query = QPushButton("⏹ 停止")
@@ -982,33 +452,41 @@ class AccountsPage(QWidget):
         self._table.doubleClicked.connect(self._on_table_double_click)
         content_layout.addWidget(self._table, 1)
 
-        # 翻页栏
-        pager_row = QHBoxLayout()
-        self._btn_prev = QPushButton("◀ 上一页")
-        self._btn_prev.setObjectName("secondary_btn")
-        self._btn_prev.clicked.connect(self._prev_page)
-        pager_row.addWidget(self._btn_prev)
+        # === 消耗明细 ===
+        usage_card = QFrame()
+        usage_card.setObjectName("card")
+        usage_layout = QVBoxLayout(usage_card)
+        usage_layout.setSpacing(8)
 
-        self._page_label = QLabel("0 / 0")
-        self._page_label.setStyleSheet("font-size: 13px; font-weight: 600;")
-        self._page_label.setAlignment(Qt.AlignCenter)
-        pager_row.addWidget(self._page_label)
+        usage_header = QHBoxLayout()
+        usage_icon = QLabel("📊")
+        usage_icon.setStyleSheet("font-size: 18px;")
+        usage_header.addWidget(usage_icon)
 
-        self._btn_next = QPushButton("下一页 ▶")
-        self._btn_next.setObjectName("secondary_btn")
-        self._btn_next.clicked.connect(self._next_page)
-        pager_row.addWidget(self._btn_next)
+        usage_title = QLabel("消耗明细")
+        usage_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        usage_header.addWidget(usage_title)
+        usage_header.addStretch()
+        usage_layout.addLayout(usage_header)
 
-        pager_row.addStretch()
+        usage_subtitle = QLabel("每次调用的模型与 Token 消耗")
+        usage_subtitle.setStyleSheet("color: #9BA4B0; font-size: 12px;")
+        usage_layout.addWidget(usage_subtitle)
 
-        pager_row.addWidget(QLabel("跳到:"))
-        self._page_spin = QSpinBox()
-        self._page_spin.setRange(1, 1)
-        self._page_spin.setFixedWidth(70)
-        self._page_spin.valueChanged.connect(self._goto_page)
-        pager_row.addWidget(self._page_spin)
+        self._usage_table = QTableWidget()
+        self._usage_table.setColumnCount(5)
+        self._usage_table.setHorizontalHeaderLabels([
+            "时间", "模型", "请求Token", "响应Token", "总Token"
+        ])
+        usage_header_obj = self._usage_table.horizontalHeader()
+        usage_header_obj.setSectionResizeMode(QHeaderView.Stretch)
+        self._usage_table.setAlternatingRowColors(True)
+        self._usage_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._usage_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._usage_table.setMaximumHeight(280)
+        usage_layout.addWidget(self._usage_table)
 
-        content_layout.addLayout(pager_row)
+        content_layout.addWidget(usage_card)
 
         # 进度条
         self._progress_bar = QProgressBar()
@@ -1067,16 +545,7 @@ class AccountsPage(QWidget):
         self._accounts = load_accounts()
 
     def _apply_filter(self):
-        search = self._search_input.text().lower()
-
         filtered = self._accounts
-        if search:
-            filtered = [a for a in filtered if
-                       search in a.nickname.lower() or
-                       search in a.uid.lower() or
-                       search in a.platform.value or
-                       search in a.ck.lower() or
-                       search in a.api_key.lower()]
 
         self._filtered_accounts = filtered
         self._apply_sort()
@@ -1180,6 +649,30 @@ class AccountsPage(QWidget):
         self._apply_filter()
         self._current_page = 0
         self._render_page()
+        self._refresh_usage_table()
+
+    def _refresh_usage_table(self):
+        """刷新消耗明细表格（从 ProxyDatabase 读取最近的 request_logs）"""
+        from ...modules.proxy_server import ProxyDatabase
+        try:
+            db = ProxyDatabase.get_instance()
+            logs = db.get_request_logs(limit=200)
+        except Exception:
+            logs = []
+
+        # 过滤掉输入和输出都为 0 的记录
+        logs = [l for l in logs if l.get("prompt_tokens", 0) > 0 or l.get("completion_tokens", 0) > 0]
+
+        self._usage_table.setRowCount(len(logs))
+        for row, log in enumerate(reversed(logs)):
+            ts = log.get("timestamp", 0)
+            ts_text = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "-"
+            self._usage_table.setItem(row, 0, QTableWidgetItem(ts_text))
+            self._usage_table.setItem(row, 1, QTableWidgetItem(log.get("model", "-")))
+            self._usage_table.setItem(row, 2, QTableWidgetItem(str(log.get("prompt_tokens", 0))))
+            self._usage_table.setItem(row, 3, QTableWidgetItem(str(log.get("completion_tokens", 0))))
+            total_tokens = log.get("prompt_tokens", 0) + log.get("completion_tokens", 0)
+            self._usage_table.setItem(row, 4, QTableWidgetItem(str(total_tokens)))
 
     def _on_filter_changed(self):
         """筛选变化时重置到第一页"""
@@ -1388,7 +881,7 @@ class AccountsPage(QWidget):
         if not accounts_with_token:
             return
 
-        max_workers = self._concurrency_spin.value()
+        max_workers = 5
 
         self._btn_query_all.setVisible(False)
         self._btn_stop_query.setVisible(True)
@@ -1515,7 +1008,7 @@ class AccountsPage(QWidget):
             QMessageBox.information(self, "提示", "没有配置 API Key 的账号，无需检测")
             return
 
-        max_workers = self._concurrency_spin.value()
+        max_workers = 5
         self._btn_check_status.setEnabled(False)
         self._btn_query_all.setEnabled(False)
         self._btn_stop_query.setVisible(True)
@@ -1741,813 +1234,6 @@ class AccountsPage(QWidget):
         """添加账号后刷新表格"""
         self._refresh_table()
 
-    def _import_batch(self):
-        """从文件批量导入账号（支持 JSON 含 api_key / 纯 api_key 列表 / JWT Token）"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择账号文件", "",
-            "JSON 文件 (*.json);;文本文件 (*.txt);;CSV 文件 (*.csv);;所有文件 (*)"
-        )
-        if not file_path:
-            return
-
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception as e:
-            QMessageBox.warning(self, "读取失败", f"无法读取文件：{e}")
-            return
-
-        added = 0
-        skipped = 0
-        updated = 0
-
-        # 优先尝试 JSON 格式
-        try:
-            import json
-            data = json.loads(content)
-            if isinstance(data, list):
-                for item in data:
-                    try:
-                        # 支持字段：api_key / auth_token / access_token / uid / nickname / sub / preferred_username
-                        token = item.get("auth_token", "") or item.get("access_token", "")
-                        api_key = item.get("api_key", "")
-                        uid = item.get("uid", "") or item.get("sub", "")
-                        nickname = item.get("nickname", "") or item.get("preferred_username", "")
-
-                        if not token and not api_key and not uid:
-                            skipped += 1
-                            continue
-
-                        # 优先用 api_key（ck_xxx），其次 token
-                        effective_credential = api_key or token
-
-                        # JSON里没有uid就从token解析
-                        if not uid and token and not token.startswith("ck_"):
-                            from ...modules.oauth import decode_jwt
-                            payload = decode_jwt(token)
-                            uid = payload.get("sub", "")
-                            nickname = nickname or payload.get("preferred_username", "")
-
-                        if not uid:
-                            # ck_ 开头的 api_key，uid 必填或用 api_key 前缀
-                            if api_key:
-                                uid = item.get("uid", "") or f"api_{api_key[3:11]}"
-                                nickname = nickname or uid
-                            else:
-                                skipped += 1
-                                continue
-
-                        # 检查是否已存在（按uid去重）
-                        existing = [a for a in load_accounts() if a.uid == uid]
-                        account = Account(
-                            uid=uid,
-                            nickname=nickname or uid,
-                            platform=Platform.CODEBUDDY,
-                            auth_token=effective_credential,
-                            api_key=api_key,
-                        )
-                        save_account(account)
-
-                        # 同步导入到上游 Key 池
-                        if api_key:
-                            try:
-                                from ...modules.proxy_server import ProxyDatabase
-                                proxy_db = ProxyDatabase.get_instance()
-                                existing_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-                                if api_key not in existing_keys:
-                                    import secrets as _sec
-                                    proxy_db.add_upstream_key({
-                                        "key_id": f"ck_{_sec.token_hex(4)}",
-                                        "api_key": api_key,
-                                        "label": uid,
-                                        "status": "active",
-                                        "points": "",
-                                        "points_updated_at": "",
-                                        "packages": [],
-                                        "created_at": "",
-                                    })
-                                    proxy_db._dirty = True
-                                    proxy_db._flush_to_disk()
-                            except Exception:
-                                pass
-
-                        if existing:
-                            updated += 1
-                        else:
-                            added += 1
-                    except Exception:
-                        skipped += 1
-
-                self._refresh_table()
-                msg = f"✅ 成功导入 {added} 个账号"
-                if updated:
-                    msg += f"\n🔄 更新 {updated} 个已有账号"
-                if skipped:
-                    msg += f"\n⚠️ 跳过 {skipped} 个（无效数据）"
-                QMessageBox.information(self, "导入完成", msg)
-                return
-        except (json.JSONDecodeError, TypeError):
-            pass  # 不是JSON，尝试文本格式
-
-        # 文本格式：每行一个 Token 或 API Key，支持 "手机号----apikey" 格式
-        tokens = []
-        for line in content.strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if "----" in line:
-                # 格式：手机号----apikey
-                parts = line.split("----")
-                if len(parts) >= 2:
-                    phone = parts[0].strip().strip('"').strip("'")
-                    api_key = parts[1].strip().strip('"').strip("'")
-                    if phone and api_key:
-                        tokens.append({"phone": phone, "api_key": api_key})
-                        continue
-            if "," in line:
-                for part in line.split(","):
-                    part = part.strip().strip('"').strip("'")
-                    if part:
-                        tokens.append(part)
-            else:
-                tokens.append(line)
-
-        if not tokens:
-            QMessageBox.warning(self, "导入失败", "文件中没有找到有效的 Token 或 API Key")
-            return
-
-        from ...modules.oauth import decode_jwt
-
-        for token in tokens:
-            try:
-                # 支持 "手机号----apikey" 格式（dict）
-                if isinstance(token, dict):
-                    phone = token["phone"]
-                    api_key = token["api_key"]
-                    uid = phone
-                    nickname = phone
-                    account = Account(
-                        uid=uid,
-                        nickname=nickname,
-                        platform=Platform.CODEBUDDY,
-                        auth_token=api_key,
-                        api_key=api_key,
-                    )
-                    save_account(account)
-                    # 导入上游池
-                    try:
-                        from ...modules.proxy_server import ProxyDatabase
-                        proxy_db = ProxyDatabase.get_instance()
-                        existing_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-                        if api_key not in existing_keys:
-                            import secrets as _sec
-                            proxy_db.add_upstream_key({
-                                "key_id": f"ck_{_sec.token_hex(4)}",
-                                "api_key": api_key,
-                                "label": phone,
-                                "status": "active",
-                                "points": "",
-                                "points_updated_at": "",
-                                "packages": [],
-                                "created_at": "",
-                            })
-                            proxy_db._dirty = True
-                            proxy_db._flush_to_disk()
-                    except Exception:
-                        pass
-                    added += 1
-                    continue
-
-                # ck_ 开头按 API Key 处理
-                if token.startswith("ck_"):
-                    uid = f"api_{token[3:11]}"
-                    nickname = uid
-                    account = Account(
-                        uid=uid,
-                        nickname=nickname,
-                        platform=Platform.CODEBUDDY,
-                        auth_token=token,
-                        api_key=token,
-                    )
-                    save_account(account)
-                    # 导入上游池
-                    try:
-                        from ...modules.proxy_server import ProxyDatabase
-                        proxy_db = ProxyDatabase.get_instance()
-                        existing_keys = {k.get("api_key", "") for k in proxy_db.get_upstream_keys()}
-                        if token not in existing_keys:
-                            import secrets as _sec
-                            proxy_db.add_upstream_key({
-                                "key_id": f"ck_{_sec.token_hex(4)}",
-                                "api_key": token,
-                                "label": uid,
-                                "status": "active",
-                                "points": "",
-                                "points_updated_at": "",
-                                "packages": [],
-                                "created_at": "",
-                            })
-                            proxy_db._dirty = True
-                            proxy_db._flush_to_disk()
-                    except Exception:
-                        pass
-                    added += 1
-                else:
-                    # JWT Token
-                    payload = decode_jwt(token)
-                    uid = payload.get("sub", "")
-                    nickname = payload.get("preferred_username", "")
-                    if not uid:
-                        skipped += 1
-                        continue
-                    account = Account(
-                        uid=uid,
-                        nickname=nickname,
-                        platform=Platform.CODEBUDDY,
-                        auth_token=token,
-                    )
-                    save_account(account)
-                    added += 1
-            except Exception:
-                skipped += 1
-
-        self._refresh_table()
-        msg = f"✅ 成功导入 {added} 个账号"
-        if skipped:
-            msg += f"\n⚠️ 跳过 {skipped} 个（无效 Token/API Key）"
-        QMessageBox.information(self, "导入完成", msg)
-
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_table()
-
-
-class ServerFetchDialog(QDialog):
-    """从服务器批量获取账号对话框 — 大输入框 + 进度条 + 防卡死
-    只获取账号凭证信息（CK/TK/API Key），不查积分
-    """
-
-    accounts_imported = Signal(list)  # 传入 List[dict]
-
-    SERVER_URL = "http://103.36.63.44:9658"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("🌐 从服务器获取账号")
-        self.setMinimumSize(680, 620)
-        self._cancel_requested = False
-        # macOS 修复：嵌套 QDialog 内 QTextEdit 无法接收键盘输入
-        # 原因：macOS 上 Qt 的嵌套 QDialog 会拦截子控件的键盘事件
-        # 解决：设为独立窗口，让内部控件能正常接收键盘输入
-        import sys
-        if sys.platform == "darwin":
-            self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window)
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-
-        # ─── 说明 ───
-        hint = QLabel(
-            "输入卡密批量获取账号凭证（CK/TK/API Key），每行一个。支持格式：\n"
-            "• 16位数字卡密\n"
-            "• 手机号----登录URL\n"
-            "• 子API Key (sk_xxx)"
-        )
-        hint.setObjectName("inline_hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        # ─── 大输入框 ───
-        self._input = QTextEdit()
-        self._input.setPlaceholderText(
-            "每行一个卡密，例如：\n"
-            "1234567890123456\n"
-            "13800138000----https://copilot.tencent.com/login?platform=xxx&state=yyy\n"
-            "sk_abc123def456"
-        )
-        self._input.setMinimumHeight(200)
-        layout.addWidget(self._input, 1)
-
-        # ─── 进度区域 ───
-        prog_box = QVBoxLayout()
-        prog_box.setSpacing(6)
-
-        self._progress_label = QLabel("")
-        self._progress_label.setStyleSheet("color: #2B6CB0; font-size: 12px; font-weight: 600;")
-        prog_box.addWidget(self._progress_label)
-
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setMinimum(0)
-        self._progress_bar.setMaximum(100)
-        self._progress_bar.setValue(0)
-        self._progress_bar.setTextVisible(True)
-        self._progress_bar.setFormat("%v/%m (%p%)")
-        self._progress_bar.setVisible(False)
-        prog_box.addWidget(self._progress_bar)
-
-        self._detail_label = QLabel("")
-        self._detail_label.setStyleSheet("color: #718096; font-size: 11px;")
-        self._detail_label.setWordWrap(True)
-        self._detail_label.setMaximumHeight(120)
-        prog_box.addWidget(self._detail_label)
-
-        layout.addLayout(prog_box)
-
-        # ─── 结果表格 ───
-        self._result_table = QTableWidget()
-        self._result_table.setColumnCount(4)
-        self._result_table.setHorizontalHeaderLabels(["手机号", "API Key", "登录URL", "状态"])
-        self._result_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._result_table.setAlternatingRowColors(True)
-        self._result_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._result_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._result_table.setMaximumHeight(200)
-        self._result_table.setVisible(False)
-        layout.addWidget(self._result_table)
-
-        # ─── 按钮 ───
-        btn_row = QHBoxLayout()
-
-        self._btn_fetch = QPushButton("🚀 开始获取")
-        self._btn_fetch.setObjectName("primary_btn")
-        self._btn_fetch.setMinimumHeight(36)
-        self._btn_fetch.clicked.connect(self._start_fetch)
-        btn_row.addWidget(self._btn_fetch)
-
-        self._btn_cancel = QPushButton("⏹ 取消")
-        self._btn_cancel.setObjectName("secondary_btn")
-        self._btn_cancel.setMinimumHeight(36)
-        self._btn_cancel.setEnabled(False)
-        self._btn_cancel.clicked.connect(self._cancel_fetch)
-        btn_row.addWidget(self._btn_cancel)
-
-        self._btn_import = QPushButton("📥 导入选中")
-        self._btn_import.setObjectName("primary_btn")
-        self._btn_import.setMinimumHeight(36)
-        self._btn_import.setEnabled(False)
-        self._btn_import.clicked.connect(self._import_selected)
-        btn_row.addWidget(self._btn_import)
-
-        btn_row.addStretch()
-        close_btn = QPushButton("关闭")
-        close_btn.setObjectName("secondary_btn")
-        close_btn.clicked.connect(self.reject)
-        btn_row.addWidget(close_btn)
-
-        layout.addLayout(btn_row)
-
-    # ─── 解析输入 ───
-
-    def _parse_lines(self, text: str) -> list:
-        """解析多行输入，每行一个卡密，自动识别格式"""
-        items = []
-        for line in text.strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("sk_"):
-                items.append({"sub_api_key": line, "_raw": line})
-            elif "----" in line:
-                items.append({"phone_url": line, "_raw": line})
-            else:
-                items.append({"card_code": line, "_raw": line})
-        return items
-
-    # ─── 启动获取 ───
-
-    def _start_fetch(self):
-        text = self._input.toPlainText().strip()
-        if not text:
-            QMessageBox.warning(self, "提示", "请输入卡密")
-            return
-
-        items = self._parse_lines(text)
-        if not items:
-            QMessageBox.warning(self, "提示", "未识别到有效卡密")
-            return
-
-        self._items = items
-        self._results = []  # List[dict] 每个账号的结果
-        self._cancel_requested = False
-
-        # UI切换到工作状态
-        self._btn_fetch.setEnabled(False)
-        self._btn_cancel.setEnabled(True)
-        self._btn_import.setEnabled(False)
-        self._progress_bar.setVisible(True)
-        self._progress_bar.setMaximum(len(items))
-        self._progress_bar.setValue(0)
-        self._progress_label.setText(f"⏳ 准备获取 {len(items)} 个卡密的账号信息...")
-        self._detail_label.setText("")
-        self._result_table.setRowCount(0)
-        self._result_table.setVisible(False)
-
-        from PySide6.QtCore import QThread, Signal as QSignal
-
-        class BatchFetchThread(QThread):
-            """后台批量获取线程 — 只获取凭证，不查积分，防卡死"""
-            progress = QSignal(int, str)         # current_index, status_text
-            item_done = QSignal(int, dict)       # index, result_dict
-            all_done = QSignal(list)             # all results
-
-            SERVER_URL = "http://103.36.63.44:9658"
-
-            def __init__(self, items):
-                super().__init__()
-                self._items = items
-                self._cancelled = False
-
-            def cancel(self):
-                self._cancelled = True
-
-            def _fetch_one(self, item: dict) -> dict:
-                """获取单个卡密的账号凭证（CK/TK/API Key），不查积分"""
-                import requests, json
-
-                raw = item.get("_raw", "")
-                result = {"raw": raw, "success": False, "phone": "", "api_key": "",
-                          "login_url": "", "error": ""}
-
-                # ─── 展开子API Key ───
-                query_items = []
-                if "sub_api_key" in item:
-                    try:
-                        resp = requests.post(
-                            f"{self.SERVER_URL}/api/get_active_keys",
-                            json={"sub_api_key": item["sub_api_key"]},
-                            headers={"Content-Type": "application/json"},
-                            timeout=15,
-                        )
-                        data = resp.json()
-                        if not data.get("success"):
-                            result["error"] = f"子Key验证失败: {data.get('message', '未知')}"
-                            return result
-                        for ak in (data.get("active_keys") or []):
-                            phone = ak.get("phone", "")
-                            api_url = ak.get("api_url", "")
-                            if phone:
-                                query_items.append({"phone_url": f"{phone}----{api_url}" if api_url else phone, "_phone": phone, "_api_url": api_url})
-                        if not query_items:
-                            result["error"] = "子Key无活跃主Key"
-                            return result
-                    except Exception as e:
-                        result["error"] = f"子Key异常: {e}"
-                        return result
-                else:
-                    query_items = [item]
-
-                # ─── 提交 web_batch_query 获取手机号 ───
-                try:
-                    resp = requests.post(
-                        f"{self.SERVER_URL}/api/web_batch_query",
-                        json={"items": query_items},
-                        headers={"Content-Type": "application/json"},
-                        timeout=30,
-                    )
-                except requests.ConnectionError:
-                    result["error"] = "连接失败"
-                    return result
-                except requests.Timeout:
-                    result["error"] = "提交超时"
-                    return result
-
-                if not resp.ok:
-                    result["error"] = f"HTTP {resp.status_code}"
-                    return result
-
-                data = resp.json()
-                if not data.get("success"):
-                    result["error"] = data.get("message", "查询失败")
-                    return result
-
-                # 从 results 中提取手机号和 key（不需要等SSE查分完成）
-                accounts_found = []
-                results_list = data.get("results", [])
-                for r in results_list:
-                    if r.get("success"):
-                        phone = r.get("phone", "")
-                        key = r.get("key", "")
-                        api_key = r.get("api_key", "")  # web_batch_query 已返回 api_key，直接取
-                        accounts_found.append({"phone": phone, "key": key, "api_key": api_key})
-                    else:
-                        # 某项失败
-                        result["error"] = r.get("message", "卡密错误")
-                        return result
-
-                if not accounts_found:
-                    result["error"] = "未获取到账号信息"
-                    return result
-
-                # ─── 获取 API Key ───
-                api_keys_map = {}  # phone -> api_key
-                try:
-                    credentials = []
-                    for qi in query_items:
-                        if "card_code" in qi:
-                            credentials.append({"type": "card_code", "value": qi["card_code"]})
-                        elif "phone_url" in qi:
-                            credentials.append({"type": "phone_url", "value": qi["phone_url"]})
-                    if credentials:
-                        kr = requests.post(
-                            f"{self.SERVER_URL}/api/web_batch_get_api_keys",
-                            json={"keys": credentials},
-                            headers={"Content-Type": "application/json"},
-                            timeout=15,
-                        )
-                        if kr.ok:
-                            kd = kr.json()
-                            if kd.get("success") and kd.get("data"):
-                                for d in kd["data"]:
-                                    if d.get("phone") and d.get("api_key"):
-                                        api_keys_map[d["phone"]] = d["api_key"]
-                except Exception:
-                    pass
-
-                # ─── 从 phone_url 中提取登录URL ───
-                login_url_map = {}  # phone -> login_url
-                for qi in query_items:
-                    if "phone_url" in qi:
-                        parts = qi["phone_url"].split("----", 1)
-                        if len(parts) == 2:
-                            p = parts[0].strip()
-                            url = parts[1].strip()
-                            login_url_map[p] = url
-                    if "_phone" in qi and qi.get("_api_url"):
-                        login_url_map[qi["_phone"]] = qi["_api_url"]
-
-                # ─── 组装结果 ───
-                # 优先用 web_batch_query 直接返回的 api_key，其次用 web_batch_get_api_keys 的结果
-                if len(accounts_found) == 1:
-                    acc = accounts_found[0]
-                    phone = acc.get("phone", "")
-                    direct_api_key = acc.get("api_key", "")
-                    result.update({
-                        "success": True,
-                        "phone": phone,
-                        "api_key": direct_api_key or api_keys_map.get(phone, ""),
-                        "login_url": login_url_map.get(phone, ""),
-                    })
-                else:
-                    # 多账号：第一个放主结果，其余放 extra_accounts
-                    result.update({
-                        "success": True,
-                        "phone": "",
-                        "api_key": "",
-                        "login_url": "",
-                        "extra_accounts": [],
-                    })
-                    for acc in accounts_found:
-                        phone = acc.get("phone", "")
-                        direct_api_key = acc.get("api_key", "")
-                        sub = {
-                            "success": True,
-                            "phone": phone,
-                            "api_key": direct_api_key or api_keys_map.get(phone, ""),
-                            "login_url": login_url_map.get(phone, ""),
-                            "raw": raw,
-                        }
-                        if not result["phone"]:
-                            result.update(sub)
-                        else:
-                            result.setdefault("extra_accounts", []).append(sub)
-
-                return result
-
-            def run(self):
-                for i, item in enumerate(self._items):
-                    if self._cancelled:
-                        break
-                    raw = item.get("_raw", f"项目{i+1}")
-                    self.progress.emit(i, f"正在获取第 {i+1}/{len(self._items)} 个: {raw[:20]}...")
-
-                    try:
-                        r = self._fetch_one(item)
-                    except Exception as e:
-                        r = {"raw": raw, "success": False, "error": str(e),
-                             "phone": "", "api_key": "", "login_url": ""}
-
-                    self.item_done.emit(i, r)
-
-                self.all_done.emit([])
-
-        self._thread = BatchFetchThread(items)
-        self._thread.progress.connect(self._on_progress)
-        self._thread.item_done.connect(self._on_item_done)
-        self._thread.all_done.connect(self._on_all_done)
-        self._thread.start()
-
-    def _cancel_fetch(self):
-        self._cancel_requested = True
-        if hasattr(self, '_thread') and self._thread.isRunning():
-            self._thread.cancel()
-        self._progress_label.setText("⏹ 正在取消...")
-        self._btn_cancel.setEnabled(False)
-
-    # ─── 回调 ───
-
-    def _on_progress(self, idx, text):
-        self._progress_label.setText(f"⏳ {text}")
-        self._progress_bar.setValue(idx)
-
-    def _on_item_done(self, idx, result):
-        self._progress_bar.setValue(idx + 1)
-        ok = result.get("success", False)
-
-        # 处理 extra_accounts（子Key展开的多账号）
-        all_accounts = []
-        if ok:
-            all_accounts.append(result)
-            for extra in result.get("extra_accounts", []):
-                all_accounts.append(extra)
-
-        # 更新结果表格
-        self._result_table.setVisible(True)
-        for acc in all_accounts:
-            row = self._result_table.rowCount()
-            self._result_table.insertRow(row)
-            self._result_table.setItem(row, 0, QTableWidgetItem(acc.get("phone", "")))
-
-            ak = acc.get("api_key", "")
-            self._result_table.setItem(row, 1, QTableWidgetItem(ak[:30] + "..." if len(ak) > 30 else ak))
-
-            login_url = acc.get("login_url", "")
-            self._result_table.setItem(row, 2, QTableWidgetItem(login_url[:40] + "..." if len(login_url) > 40 else login_url))
-
-            if ak:
-                self._result_table.setItem(row, 3, QTableWidgetItem("✅ 有API Key"))
-            elif login_url:
-                self._result_table.setItem(row, 3, QTableWidgetItem("⚠️ 仅有URL"))
-            else:
-                self._result_table.setItem(row, 3, QTableWidgetItem("❓ 仅有手机号"))
-
-            self._results.append(acc)
-
-        # 失败的也显示
-        if not ok:
-            detail_text = self._detail_label.text()
-            err_line = f"❌ {result.get('raw', '?')[:20]}: {result.get('error', '未知')}"
-            self._detail_label.setText((detail_text + "\n" + err_line).strip())
-
-            row = self._result_table.rowCount()
-            self._result_table.insertRow(row)
-            self._result_table.setItem(row, 0, QTableWidgetItem(result.get("raw", "")[:20]))
-            self._result_table.setItem(row, 1, QTableWidgetItem(""))
-            self._result_table.setItem(row, 2, QTableWidgetItem(""))
-            self._result_table.setItem(row, 3, QTableWidgetItem(f"❌ {result.get('error', '未知')[:20]}"))
-            for c in range(4):
-                it = self._result_table.item(row, c)
-                if it:
-                    it.setForeground(Qt.red)
-
-    def _on_all_done(self, results):
-        self._btn_fetch.setEnabled(True)
-        self._btn_cancel.setEnabled(False)
-
-        success_count = sum(1 for r in self._results if r.get("success"))
-        fail_count = sum(1 for r in self._results if not r.get("success"))
-        total = len(self._results)
-
-        if self._cancel_requested:
-            self._progress_label.setText(f"⏹ 已取消 — 成功 {success_count}/{total}")
-        else:
-            self._progress_label.setText(f"✅ 完成 — 成功 {success_count}，失败 {fail_count}，共 {total}")
-
-        self._progress_bar.setValue(self._progress_bar.maximum())
-
-        if success_count > 0:
-            self._btn_import.setEnabled(True)
-            self._result_table.selectAll()
-
-    # ─── 导入 ───
-
-    def _import_selected(self):
-        """导入选中的行到账号列表"""
-        selected_rows = set()
-        for item in self._result_table.selectedItems():
-            selected_rows.add(item.row())
-
-        if not selected_rows:
-            QMessageBox.warning(self, "提示", "请先在表格中选择要导入的账号")
-            return
-
-        accounts = []
-        phones_with_cookie = []  # 收集有手机号的账号，用于批量获取Cookie
-        sorted_rows = sorted(selected_rows)
-        for row in sorted_rows:
-            phone_item = self._result_table.item(row, 0)
-            if not phone_item:
-                continue
-            phone = phone_item.text()
-            matched = [r for r in self._results if r.get("success") and r.get("phone") == phone]
-            if not matched:
-                continue
-            r = matched[0]
-
-            # CK 格式: phone----login_url，确保登录网页时能提取手机号和短信链接
-            ck_value = ""
-            login_url = r.get("login_url", "")
-            if phone and login_url:
-                ck_value = f"{phone}----{login_url}"
-            elif login_url:
-                ck_value = login_url
-            elif phone:
-                ck_value = phone
-
-            acc_data = {
-                "uid": phone or r.get("phone", ""),
-                "nickname": phone or r.get("phone", ""),
-                "auth_token": r.get("api_key", ""),
-                "platform": Platform.CODEBUDDY,
-                "domain": "www.codebuddy.cn",
-                "ck": ck_value,
-                "api_key": r.get("api_key", ""),
-            }
-            accounts.append(acc_data)
-            if phone:
-                phones_with_cookie.append(phone)
-
-        # ── 批量从服务器获取 Cookie 并保存到本地 ──
-        api_url_map = {}
-        if phones_with_cookie:
-            api_url_map = self._fetch_and_save_cookies(phones_with_cookie)
-
-        # 用服务器返回的 api_url 补全缺少 login_url 的账号
-        if api_url_map:
-            for acc_data in accounts:
-                phone = acc_data.get("uid", "")
-                ck = acc_data.get("ck", "")
-                # 如果 CK 里没有 URL，用服务器的 api_url 补全
-                if phone and phone in api_url_map and "----" not in ck and "http" not in ck:
-                    acc_data["ck"] = f"{phone}----{api_url_map[phone]}"
-
-        if accounts:
-            self.accounts_imported.emit(accounts)
-            QMessageBox.information(self, "导入成功", f"已导入 {len(accounts)} 个账号")
-            self.accept()
-        else:
-            QMessageBox.warning(self, "提示", "没有可导入的有效账号")
-
-    def _fetch_and_save_cookies(self, phones: list):
-        """从服务器批量获取 Cookie 并保存到本地文件
-
-        调用服务器 batch_get_cookies API，把返回的 cookie_data 保存到
-        ~/.antigravity-tools/cookies/cookie_{phone}.json，登录网页时可直接使用。
-        同时用服务器返回的 api_url 补全缺少 login_url 的账号。
-        """
-        import requests, json, os
-        from pathlib import Path
-
-        try:
-            resp = requests.post(
-                f"{self.SERVER_URL}/api/batch_get_cookies",
-                json={"phones": phones},
-                headers={"Content-Type": "application/json"},
-                timeout=30,
-            )
-            if not resp.ok:
-                return {}
-
-            data = resp.json()
-            if not data.get("success"):
-                return {}
-
-            cookie_dir = Path(os.path.expanduser("~")) / ".antigravity-tools" / "cookies"
-            cookie_dir.mkdir(parents=True, exist_ok=True)
-
-            saved = 0
-            api_url_map = {}  # phone -> api_url，用于补全 CK
-            for acc in data.get("accounts", []):
-                phone = acc.get("phone", "")
-                # 优先使用 cookie_data，其次 original_cookie_data
-                cookie_data = acc.get("cookie_data", "") or acc.get("original_cookie_data", "")
-                api_url = acc.get("api_url", "")
-
-                # 记录 api_url 用于补全 CK
-                if phone and api_url:
-                    api_url_map[phone] = api_url
-
-                if not phone or not cookie_data:
-                    continue
-
-                # cookie_data 是 JSON 数组字符串，和 Playwright cookies 格式一致
-                try:
-                    cookies_list = json.loads(cookie_data) if isinstance(cookie_data, str) else cookie_data
-                    if isinstance(cookies_list, list) and len(cookies_list) > 0:
-                        cookie_file = cookie_dir / f"cookie_{phone}.json"
-                        cookie_file.write_text(
-                            json.dumps(cookies_list, ensure_ascii=False, indent=2),
-                            encoding="utf-8"
-                        )
-                        saved += 1
-                except (json.JSONDecodeError, TypeError):
-                    continue
-
-            if saved > 0:
-                logger.info(f"从服务器获取并保存了 {saved} 个账号的 Cookie")
-
-            return api_url_map
-        except Exception as e:
-            logger.warning(f"从服务器获取 Cookie 失败: {e}")
-            return {}

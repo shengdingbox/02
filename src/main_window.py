@@ -1,4 +1,4 @@
-"""主窗口 - Antigravity Tools 桌面应用"""
+"""主窗口 - Buddy Tool 桌面应用"""
 
 import logging
 import os
@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import Qt, QSize, Slot
+from PySide6.QtCore import Qt, QSize, Slot, QTimer
 
 from .ui import Sidebar, get_stylesheet
 from .ui.pages import (
@@ -30,7 +30,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._update_version_suffix()
-        self.setWindowTitle("⚡ Antigravity Tools")
+        self.setWindowTitle("⚡ Buddy Tool")
         self.setMinimumSize(QSize(1100, 700))
         self.resize(1200, 800)
 
@@ -48,10 +48,90 @@ class MainWindow(QMainWindow):
         # 自动更新
         self._setup_updater()
 
+        # 自动签到：启动 5 秒后执行一次，之后每小时执行一次
+        self._checkin_timer = QTimer(self)
+        self._checkin_timer.setInterval(3600_000)  # 1 小时
+        self._checkin_timer.timeout.connect(self._auto_checkin)
+        QTimer.singleShot(5000, self._auto_checkin)  # 5 秒后首次签到
+
     def _update_version_suffix(self):
         """更新窗口标题中的版本号"""
         ver = get_current_version()
-        self.setWindowTitle(f"⚡ Antigravity Tools v{ver}")
+        self.setWindowTitle(f"⚡ Buddy Tool v{ver}")
+
+    def _auto_checkin(self):
+        """自动签到 — 后台静默执行，不弹窗"""
+        try:
+            from .ui.pages.checkin import CheckinWorker
+            from .utils.store import load_accounts
+            from PySide6.QtCore import QThread, Signal as QSignal
+
+            accounts = load_accounts()
+            if not accounts:
+                return
+
+            # 只签未签到的
+            unchecked = [a for a in accounts if not a.checkin.checked_today]
+            if not unchecked:
+                logger.info("[自动签到] 所有账号今日已签到，跳过")
+                return
+
+            logger.info(f"[自动签到] 开始签到 {len(unchecked)} 个账号")
+
+            class AutoCheckinWorker(QThread):
+                done = QSignal()
+
+                def __init__(self, accs):
+                    super().__init__()
+                    self._accs = accs
+                    self._stop_flag = False
+
+                def stop(self):
+                    self._stop_flag = True
+
+                def run(self):
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    from ...modules import CheckinManager
+                    from ...utils.store import save_account
+
+                    success, already, failed = 0, 0, 0
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        futures = {executor.submit(self._checkin_one, acc): acc for acc in self._accs}
+                        for future in as_completed(futures):
+                            if self._stop_flag:
+                                break
+                            try:
+                                status = future.result()
+                                if status == "success":
+                                    success += 1
+                                elif status == "already":
+                                    already += 1
+                                else:
+                                    failed += 1
+                            except Exception:
+                                failed += 1
+                    logger.info(f"[自动签到] 完成: 成功 {success}, 已签到 {already}, 失败 {failed}")
+
+                @staticmethod
+                def _checkin_one(account):
+                    try:
+                        manager = CheckinManager()
+                        result = manager.checkin_account(account)
+                        if result["success"]:
+                            save_account(account)
+                            if result.get("already"):
+                                return "already"
+                            return "success"
+                        return "failed"
+                    except Exception:
+                        return "failed"
+
+            self._auto_checkin_worker = AutoCheckinWorker(unchecked)
+            self._auto_checkin_worker.done.connect(lambda: self._checkin_timer.start())
+            self._auto_checkin_worker.start()
+
+        except Exception as e:
+            logger.error(f"[自动签到] 异常: {e}")
 
     def _setup_updater(self):
         """初始化自动更新检查器"""
@@ -226,7 +306,6 @@ class MainWindow(QMainWindow):
             "dashboard": DashboardPage(),
             "accounts": AccountsPage(),
             "checkin": CheckinPage(),
-            "api_proxy": ApiProxyPage(),
             "settings": SettingsPage(),
         }
 
@@ -236,9 +315,18 @@ class MainWindow(QMainWindow):
         # 设置页面需要引用主窗口来切换主题
         self._pages["settings"].set_main_window(self)
 
+        # ApiProxyPage 不再作为独立页面显示，但保留实例供仪表盘调用服务逻辑
+        self._proxy_page = ApiProxyPage()
+
+        # 仪表盘需要引用代理页面来控制服务
+        self._pages["dashboard"].set_proxy_page(self._proxy_page)
+
+        # 代理页面需要引用仪表盘来同步控件值
+        self._proxy_page.set_dashboard_page(self._pages["dashboard"])
+
         # 跨页面信号：积分更新互相同步
         self._pages["accounts"].quota_updated.connect(self._on_accounts_quota_updated)
-        self._pages["api_proxy"].quota_updated.connect(self._on_proxy_quota_updated)
+        self._proxy_page.quota_updated.connect(self._on_proxy_quota_updated)
 
         layout.addWidget(self._stack, 1)
 
@@ -248,7 +336,7 @@ class MainWindow(QMainWindow):
     def _setup_tray(self):
         """设置系统托盘"""
         self._tray = QSystemTrayIcon(self)
-        self._tray.setToolTip("Antigravity Tools")
+        self._tray.setToolTip("Buddy Tool")
 
         # 加载应用图标（优先 .ico 文件，降级为程序化生成）
         app_icon = self._load_app_icon()
@@ -324,7 +412,7 @@ class MainWindow(QMainWindow):
         账号页面查分使用独立的 ProxyDatabase() 实例写盘，
         代理页面的 db 实例内存可能还是旧数据，需要 reload_from_disk。
         """
-        proxy_page = self._pages.get("api_proxy")
+        proxy_page = self._proxy_page
         if proxy_page:
             try:
                 proxy_page._refresh_upstream_keys(reload_from_disk=True)
@@ -385,10 +473,9 @@ class MainWindow(QMainWindow):
     def _quit_app(self):
         """退出应用 — 清理所有子进程和资源，确保进程真正退出"""
         # 1. 停止 API 代理服务器（刷盘 + 关闭 socket + 关闭连接池）
-        api_proxy_page = self._pages.get("api_proxy")
-        if api_proxy_page:
+        if self._proxy_page:
             try:
-                api_proxy_page._cleanup()
+                self._proxy_page._cleanup()
             except Exception:
                 pass
 
@@ -407,6 +494,14 @@ class MainWindow(QMainWindow):
                     page._batch_worker.stop()
             except Exception:
                 pass
+
+        # 3.5 停止自动签到定时器和 worker
+        try:
+            self._checkin_timer.stop()
+            if hasattr(self, '_auto_checkin_worker') and self._auto_checkin_worker:
+                self._auto_checkin_worker.stop()
+        except Exception:
+            pass
 
         # 5. 隐藏托盘图标
         try:
@@ -454,7 +549,7 @@ class MainWindow(QMainWindow):
             self.hide()
             self._tray.show()
             self._tray.showMessage(
-                "Antigravity Tools",
+                "Buddy Tool",
                 "已最小化到系统托盘，双击图标恢复",
             )
         else:
