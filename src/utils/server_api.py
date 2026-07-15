@@ -19,12 +19,12 @@ logger = logging.getLogger(__name__)
 SERVER_BASE = "http://47.83.145.136:8787"
 
 # AES-256-GCM 密钥（与服务端一致，hex → 32 字节）
-_AES_KEY_HEX = "e7283867e8d5a1da2f67de4727f12e26ca4d2f7ae83e51dd208d18e75016ed4a"
+_AES_KEY_HEX = "38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0"
 _AES_KEY = bytes.fromhex(_AES_KEY_HEX)
 
 # HMAC-SHA256 签名
-_API_KEY = "buddy-public"
-_HMAC_KEY = b"d091d26fa339be10d3eabd28419ec943"
+_API_KEY = "buddy_707d23cb0832fb0f0fc4a3d7"
+_HMAC_KEY = b"db1a906d80eb73a82d3ded42ffb64be5"
 
 # 绕过系统代理，直连服务端
 _NO_PROXY = {"http": None, "https": None}

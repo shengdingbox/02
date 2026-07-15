@@ -43,19 +43,14 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
-
-      - name: Package as zip
-        run: |
-          cd dist
-          Compress-Archive -Path "app.dist" -DestinationPath "BuddyTool-Windows-x64.zip"
+          python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: |
-            dist/BuddyTool-Windows-x64.zip
+            dist/BuddyTool.exe
 
   build-macos-intel:
     runs-on: macos-14
@@ -90,23 +85,18 @@ jobs:
 
       - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          arch -x86_64 python -m nuitka --onefile --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify app architecture
         run: |
-          file "dist/app.dist/BuddyTool"
-
-      - name: Package with ditto
-        run: |
-          cd dist
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "app.dist" "BuddyTool-macOS-Intel.zip"
+          file "dist/BuddyTool"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-intel-build
           path: |
-            dist/BuddyTool-macOS-Intel.zip
+            dist/BuddyTool
 
   build-macos-arm:
     runs-on: macos-14
@@ -138,25 +128,20 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify ARM app architecture
         run: |
-          APP_EXE="dist/app.dist/BuddyTool"
+          APP_EXE="dist/BuddyTool"
           test -x "$APP_EXE"
           file "$APP_EXE" | grep -q 'arm64'
-
-      - name: Package with ditto
-        run: |
-          cd dist
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "app.dist" "BuddyTool-macOS-ARM.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm-build
           path: |
-            dist/BuddyTool-macOS-ARM.zip
+            dist/BuddyTool
 
   release:
     # Tag push alone never publishes. Manual dispatch must explicitly set publish=true.
@@ -203,21 +188,21 @@ jobs:
 
             | 平台 | 文件 |
             |------|------|
-            | Windows x64 | BuddyTool-Windows-x64.zip |
-            | macOS Intel | BuddyTool-macOS-Intel.zip |
-            | macOS ARM (M1/M2/M3) | BuddyTool-macOS-ARM.zip |
+            | Windows x64 | BuddyTool.exe |
+            | macOS Intel | BuddyTool (Intel) |
+            | macOS ARM (M1/M2/M3) | BuddyTool (ARM) |
 
             ### 安装
 
-            **Windows**: 下载 zip 解压，运行 `BuddyTool.exe`
+            **Windows**: 下载 `BuddyTool.exe`，双击运行
 
-            **macOS**: 下载 zip 解压，运行 `BuddyTool`
+            **macOS**: 下载 `BuddyTool`，终端执行 `chmod +x BuddyTool && ./BuddyTool`
 
             ### 版本号
             ${{ steps.version.outputs.version }}
           files: |
-            artifacts/windows-build/BuddyTool-Windows-x64.zip
-            artifacts/macos-intel-build/BuddyTool-macOS-Intel.zip
-            artifacts/macos-arm-build/BuddyTool-macOS-ARM.zip
+            artifacts/windows-build/BuddyTool.exe
+            artifacts/macos-intel-build/BuddyTool
+            artifacts/macos-arm-build/BuddyTool
           draft: false
           prerelease: false

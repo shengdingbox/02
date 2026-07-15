@@ -28,7 +28,7 @@ echo 正在打包，请稍候（Nuitka 首次编译约 5-10 分钟）...
 echo.
 
 venv\Scripts\python.exe -m nuitka ^
-    --standalone ^
+    --onefile ^
     --windows-console-mode=disable ^
     --enable-plugin=pyside6 ^
     --include-data-dir=assets=assets ^
@@ -48,24 +48,16 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo   ✅ 打包成功！
-echo   输出目录: dist\app.dist\
-echo   EXE 文件: dist\app.dist\BuddyTool.exe
+echo   输出文件: dist\BuddyTool.exe
 echo ========================================
 echo.
 
-:: 显示目录大小
-for /f %%A in ('dir /s "dist\app.dist" ^| findstr /c:"File(s)"') do echo %%A
+:: 显示文件大小
+for /f %%A in ('dir /b "dist\BuddyTool.exe"') do echo 文件: %%A
 
 echo.
-echo 可以将 dist\app.dist 整个目录打包成 zip 分发给用户
-echo 用户双击 BuddyTool.exe 即可运行，无需安装 Python
+echo 将 dist\BuddyTool.exe 直接分发给用户即可
+echo 用户双击运行，无需安装 Python
 echo.
-
-:: 询问是否压缩成 zip
-set /p ZIP="是否压缩成 zip? (y/n): "
-if /i "%ZIP%"=="y" (
-    echo 正在压缩...
-    venv\Scripts\python.exe -c "import zipfile,os;z=zipfile.ZipFile('dist/BuddyTool.zip','w',zipfile.ZIP_DEFLATED);[z.write(os.path.join(r,f),os.path.join('BuddyTool',os.path.relpath(os.path.join(r,f),'dist/app.dist'))) for r,d,fs in os.walk('dist/app.dist') for f in fs];z.close();print('✅ 压缩完成: dist/BuddyTool.zip')"
-)
 
 pause

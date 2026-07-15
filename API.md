@@ -16,7 +16,7 @@
 | 项目 | 值 |
 |------|-----|
 | 算法 | AES-256-GCM |
-| 密钥 (AES_KEY) | `e7283867e8d5a1da2f67de4727f12e26ca4d2f7ae83e51dd208d18e75016ed4a` (hex, 32字节) |
+| 密钥 (AES_KEY) | `38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0` (hex, 32字节) |
 | Nonce | 12 字节随机数 |
 | Tag | 16 字节认证标签 |
 | 密文格式 | `base64(nonce(12) + tag(16) + ciphertext)` |
@@ -28,14 +28,14 @@
 
 | 请求头 | 说明 |
 |--------|------|
-| `X-API-Key` | API Key，固定值 `buddy-public` |
+| `X-API-Key` | API Key，固定值 `buddy_707d23cb0832fb0f0fc4a3d7` |
 | `X-Timestamp` | 当前 Unix 时间戳（秒），服务端允许 ±300 秒误差 |
 | `X-API-Sign` | HMAC-SHA256 签名 |
 | `X-Sign-Method` | 固定值 `hmac-sha256` |
 
 **签名算法**:
 ```
-HMAC_KEY = "d091d26fa339be10d3eabd28419ec943"
+HMAC_KEY = "db1a906d80eb73a82d3ded42ffb64be5"
 message = "api_key={API_Key}&timestamp={timestamp}"
 sign = HMAC-SHA256(HMAC_KEY, message)  # 返回 hex 字符串
 ```
@@ -44,8 +44,8 @@ sign = HMAC-SHA256(HMAC_KEY, message)  # 返回 hex 字符串
 ```python
 import hmac, hashlib, time
 
-API_KEY = "buddy-public"
-HMAC_KEY = b"d091d26fa339be10d3eabd28419ec943"
+API_KEY = "buddy_707d23cb0832fb0f0fc4a3d7"
+HMAC_KEY = b"db1a906d80eb73a82d3ded42ffb64be5"
 
 timestamp = str(int(time.time()))
 msg = f"api_key={API_KEY}&timestamp={timestamp}"
@@ -105,7 +105,7 @@ headers = {
 import json, base64, os
 from Crypto.Cipher import AES
 
-AES_KEY = bytes.fromhex("e7283867e8d5a1da2f67de4727f12e26ca4d2f7ae83e51dd208d18e75016ed4a")
+AES_KEY = bytes.fromhex("38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0")
 
 def encrypt_body(data: dict) -> str:
     """加密请求体"""
@@ -130,8 +130,8 @@ def decrypt_body(body_text: str) -> dict:
 # 示例: 加密请求兑换接口
 import requests, hmac, hashlib, time
 
-API_KEY = "buddy-public"
-HMAC_KEY = b"d091d26fa339be10d3eabd28419ec943"
+API_KEY = "buddy_707d23cb0832fb0f0fc4a3d7"
+HMAC_KEY = b"db1a906d80eb73a82d3ded42ffb64be5"
 
 timestamp = str(int(time.time()))
 msg = f"api_key={API_KEY}&timestamp={timestamp}"
@@ -156,7 +156,7 @@ print(result)
 ```javascript
 // 使用 Web Crypto API (浏览器原生)
 async function encryptBody(data) {
-  const keyHex = "e7283867e8d5a1da2f67de4727f12e26ca4d2f7ae83e51dd208d18e75016ed4a";
+  const keyHex = "38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0";
   const keyBytes = new Uint8Array(keyHex.match(/.{2}/g).map(b => parseInt(b, 16)));
   const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
 
@@ -177,7 +177,7 @@ async function encryptBody(data) {
 }
 
 async function decryptBody(bodyText) {
-  const keyHex = "e7283867e8d5a1da2f67de4727f12e26ca4d2f7ae83e51dd208d18e75016ed4a";
+  const keyHex = "38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0";
   const keyBytes = new Uint8Array(keyHex.match(/.{2}/g).map(b => parseInt(b, 16)));
   const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
 
