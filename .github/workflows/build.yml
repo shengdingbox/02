@@ -43,7 +43,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool.exe" app.py
+          python -m nuitka --standalone --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
 
       - name: Package as zip
         run: |
@@ -90,7 +90,7 @@ jobs:
 
       - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" app.py
+          arch -x86_64 python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify app architecture
         run: |
@@ -138,7 +138,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" app.py
+          python -m nuitka --standalone --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify ARM app architecture
         run: |

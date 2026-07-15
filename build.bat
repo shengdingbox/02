@@ -35,6 +35,7 @@ venv\Scripts\python.exe -m nuitka ^
     --include-data-dir=src\i18n=src\i18n ^
     --output-dir=dist ^
     --output-filename="BuddyTool.exe" ^
+    --assume-yes-for-downloads ^
     app.py
 
 if errorlevel 1 (
