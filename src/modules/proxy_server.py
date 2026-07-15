@@ -3813,8 +3813,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 # 实时扣除积分余额（本地估算，5分钟查分时用真实值修正）
                 if credit > 0:
                     self.db.deduct_key_points(key_id, credit)
-                    # 同时扣除积分包余额（本地缓存）
+                    # 同时扣除积分包余额（本地缓存，单位与上游 credit 一致）
+                    before = self.db.get_cached_credits_balance()
                     self.db.deduct_cached_credits(credit)
+                    after = self.db.get_cached_credits_balance()
+                    logger.info(f"[积分扣减] credit={credit}, 余额 {before:.2f} → {after:.2f}")
 
                 # 子 Key 统计（原子递增）— 透传模式没有真实子Key，跳过
                 if sub_key_id != "_passthrough_":
