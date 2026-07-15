@@ -136,6 +136,7 @@ class WorkBuddyProcess:
             else:
                 result = subprocess.run(
                     ["tasklist"], capture_output=True, text=True, timeout=5,
+                    creationflags=0x08000000,
                 )
                 return "WorkBuddy.exe" in result.stdout
         except Exception:
@@ -158,6 +159,7 @@ class WorkBuddyProcess:
                 subprocess.run(
                     ["taskkill", "/IM", "WorkBuddy.exe"],
                     capture_output=True, timeout=5,
+                    creationflags=0x08000000,
                 )
                 time.sleep(2)
                 if WorkBuddyProcess.is_running():
@@ -165,6 +167,7 @@ class WorkBuddyProcess:
                     subprocess.run(
                         ["taskkill", "/F", "/IM", "WorkBuddy.exe"],
                         capture_output=True, timeout=5,
+                        creationflags=0x08000000,
                     )
                     time.sleep(2)
 

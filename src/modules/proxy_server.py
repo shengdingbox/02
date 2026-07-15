@@ -1796,6 +1796,42 @@ class ProxyDatabase:
             self._data.setdefault("settings", {}).update(settings)
             self._save()
 
+    # === 积分包余额（本地缓存 + 扣减） ===
+
+    def get_cached_credits(self) -> dict:
+        """获取本地缓存的积分包余额"""
+        with self._lock:
+            return dict(self._data.get("cached_credits", {}))
+
+    def save_cached_credits(self, credits_data: dict):
+        """保存积分包余额到本地缓存"""
+        with self._lock:
+            self._data["cached_credits"] = credits_data
+            self._save()
+
+    def deduct_cached_credits(self, amount: float):
+        """从本地缓存的积分包余额中扣减"""
+        if amount <= 0:
+            return
+        with self._lock:
+            cached = self._data.get("cached_credits", {})
+            if not cached:
+                return
+            credits = cached.get("credits", 0)
+            total_used = cached.get("totalUsed", 0)
+            today_used = cached.get("todayUsed", 0)
+            cached["credits"] = max(0, credits - amount)
+            cached["totalUsed"] = total_used + amount
+            cached["todayUsed"] = today_used + amount
+            self._data["cached_credits"] = cached
+            self._save()
+
+    def get_cached_credits_balance(self) -> float:
+        """获取本地缓存的积分包余额（仅剩余积分）"""
+        with self._lock:
+            cached = self._data.get("cached_credits", {})
+            return float(cached.get("credits", 0))
+
     # === 请求日志 ===
 
     def add_request_log(self, log: dict):
@@ -2822,6 +2858,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(messages, list) or not messages:
             self._send_json(400, {"error": {"message": "messages is required and must be a non-empty array", "type": "invalid_request"}})
             return
+
+        # 检查积分包余额（本地缓存），余额 <= 0 时拒绝请求
+        cached_balance = self.db.get_cached_credits_balance()
+        if cached_balance <= 0:
+            logger.warning(f"[额度] 积分包余额不足，拒绝请求 (balance={cached_balance})")
+            self._send_json(429, {"error": {"message": "积分包余额不足，请充值后再使用", "type": "quota_exceeded"}})
+            return
         if len(messages) < 2:
             messages.insert(0, {"role": "system", "content": "You are a helpful assistant."})
             request_data["messages"] = messages
@@ -3770,6 +3813,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 # 实时扣除积分余额（本地估算，5分钟查分时用真实值修正）
                 if credit > 0:
                     self.db.deduct_key_points(key_id, credit)
+                    # 同时扣除积分包余额（本地缓存）
+                    self.db.deduct_cached_credits(credit)
 
                 # 子 Key 统计（原子递增）— 透传模式没有真实子Key，跳过
                 if sub_key_id != "_passthrough_":

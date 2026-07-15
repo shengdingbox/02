@@ -8,6 +8,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Windows 下隐藏子进程窗口的标志
+_NO_WINDOW = 0x08000000 if platform.system() == "Windows" else 0
+
 
 def _get_disk_serial() -> str:
     """获取磁盘序列号（Windows 用 wmic，macOS 用 ioreg，Linux 用 /sys）"""
@@ -16,7 +19,8 @@ def _get_disk_serial() -> str:
             import subprocess
             result = subprocess.run(
                 ["wmic", "diskdrive", "get", "serialnumber"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5,
+                creationflags=_NO_WINDOW,
             )
             lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
             if lines:
@@ -64,7 +68,8 @@ def _get_cpu_id() -> str:
             import subprocess
             result = subprocess.run(
                 ["wmic", "cpu", "get", "ProcessorId"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5,
+                creationflags=_NO_WINDOW,
             )
             lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
             if lines:

@@ -49,6 +49,7 @@ def _get_running_processes() -> list[str]:
             result = subprocess.run(
                 ["tasklist", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=10,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW，防止黑窗口闪烁
             )
             for line in result.stdout.strip().splitlines():
                 # CSV 格式: "名称","PID","会话名","会话#","内存"

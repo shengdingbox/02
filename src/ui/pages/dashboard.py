@@ -197,7 +197,9 @@ class DashboardPage(QWidget):
         self._scale = 1.0
         self._all_cards = []
         self._proxy_page = None  # ApiProxyPage 引用，由 MainWindow 注入
+        self._credits_loaded = False  # 是否已从后端加载过积分
         self._setup_ui()
+        self._load_cached_credits()  # 启动时从本地缓存加载积分
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -256,12 +258,13 @@ class DashboardPage(QWidget):
         self._quota_progress.setFixedHeight(8)
         quota_layout.addWidget(self._quota_progress, 1)
 
+        # 隐藏徽章（保留引用避免报错）
         self._quota_badge_label = QLabel("--")
-        self._quota_badge_label.setStyleSheet(
-            "background-color: rgba(56,161,105,0.1); color: #38A169; "
-            "border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
-        )
-        quota_layout.addWidget(self._quota_badge_label)
+        self._quota_badge_label.setVisible(False)
+
+        # 按钮列：激活卡密 + 刷新积分
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(8)
 
         # 激活卡密按钮
         self._btn_activate = QPushButton(f"🔑 {t('accounts.add_account')}")
@@ -283,7 +286,30 @@ class DashboardPage(QWidget):
             }}
         """)
         self._btn_activate.clicked.connect(self._activate_card)
-        quota_layout.addWidget(self._btn_activate)
+        btn_col.addWidget(self._btn_activate)
+
+        # 刷新积分按钮
+        self._btn_refresh_credits = QPushButton("🔄 刷新积分")
+        self._btn_refresh_credits.setCursor(Qt.PointingHandCursor)
+        self._btn_refresh_credits.setMinimumHeight(36)
+        self._btn_refresh_credits.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {self._colors['accent']};
+                border: 1px solid {self._colors['accent']};
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background-color: {self._colors['accent_light']};
+            }}
+        """)
+        self._btn_refresh_credits.clicked.connect(self._refresh_credits)
+        btn_col.addWidget(self._btn_refresh_credits)
+
+        quota_layout.addLayout(btn_col)
 
         content_layout.addWidget(quota_card)
 
@@ -705,8 +731,57 @@ class DashboardPage(QWidget):
         """刷新仪表盘数据"""
         self._refresh_credits()
 
+    def _load_cached_credits(self):
+        """从本地缓存加载积分余额（不请求后端）"""
+        try:
+            db = ProxyDatabase.get_instance()
+            cached = db.get_cached_credits()
+            if cached:
+                self._render_credits(cached)
+            else:
+                self._quota_value_label.setText("--")
+                self._quota_packages_label.setText("点击 🔄 刷新查询")
+                self._quota_badge_label.setText("--")
+                self._quota_progress.setValue(0)
+        except Exception:
+            pass
+
+    def _render_credits(self, data: dict):
+        """渲染积分余额到 UI"""
+        if not data or "credits" not in data:
+            return
+        credits = float(data.get("credits", 0))
+        total_recharged = float(data.get("totalRecharged", 0))
+        total_used = float(data.get("totalUsed", 0))
+        today_used = float(data.get("todayUsed", 0))
+
+        self._quota_value_label.setText(f"{credits:.2f}")
+        self._quota_packages_label.setText(
+            f"累计充值 {total_recharged:.0f} · 已用 {total_used:.0f} · 今日 {today_used:.0f}"
+        )
+
+        if credits <= 0:
+            self._quota_badge_label.setText("已耗尽")
+            self._quota_badge_label.setStyleSheet(
+                "background-color: rgba(229,62,62,0.12); color: #E53E3E; "
+                "border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
+            )
+        else:
+            self._quota_badge_label.setText(f"剩余 {credits:.0f}")
+            self._quota_badge_label.setStyleSheet(
+                "background-color: rgba(56,161,105,0.1); color: #38A169; "
+                "border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 600;"
+            )
+
+        if total_recharged > 0:
+            percent = int(min(100, max(0, (credits / total_recharged) * 100)))
+            self._quota_progress.setValue(percent)
+        else:
+            self._quota_progress.setValue(0)
+
     def _refresh_credits(self):
-        """后台查询服务端积分"""
+        """从后端查询积分余额并更新本地缓存"""
+        self._btn_refresh_credits.setEnabled(False)
         self._quota_value_label.setText("⏳")
         self._quota_packages_label.setText("查询中...")
         self._quota_badge_label.setText("--")
@@ -728,23 +803,17 @@ class DashboardPage(QWidget):
 
     def _on_credits_done(self, result: dict):
         """积分查询完成"""
+        self._btn_refresh_credits.setEnabled(True)
+        self._credits_loaded = True
+
         if result and "credits" in result:
-            credits = result.get("credits", 0)
-            total_recharged = result.get("totalRecharged", 0)
-            total_used = result.get("totalUsed", 0)
-            today_used = result.get("todayUsed", 0)
-
-            self._quota_value_label.setText(f"{credits:.2f}")
-            self._quota_packages_label.setText(
-                f"累计充值 {total_recharged:.0f} · 已用 {total_used:.0f} · 今日 {today_used:.0f}"
-            )
-            self._quota_badge_label.setText(f"剩余 {credits:.0f}")
-
-            if total_recharged > 0:
-                percent = int(min(100, max(0, (credits / total_recharged) * 100)))
-                self._quota_progress.setValue(percent)
-            else:
-                self._quota_progress.setValue(0)
+            # 保存到本地缓存
+            try:
+                db = ProxyDatabase.get_instance()
+                db.save_cached_credits(result)
+            except Exception:
+                pass
+            self._render_credits(result)
         else:
             err = result.get("error", "无响应") if result else "无响应"
             self._quota_value_label.setText("--")
@@ -944,28 +1013,62 @@ class DashboardPage(QWidget):
             QMessageBox.warning(self, "启动失败", "服务端未返回激活码")
             return
 
-        # 将 BuddyKey 作为上游 key 添加到代理数据库
-        import secrets as _sec
-        from datetime import datetime
-        db = self._proxy_page._db
+        # 在后台线程中处理 key 写入和服务启动，避免主线程阻塞
+        from PySide6.QtCore import QThread, Signal as QSignal
 
-        # 先清除旧的上游 key，只保留新的 BuddyKey
-        for k in db.get_upstream_keys():
-            db.delete_upstream_key(k.get("key_id", ""))
+        balance = result.get("balance", 0)
 
-        db.add_upstream_key({
-            "key_id": f"bk_{_sec.token_hex(4)}",
-            "api_key": buddy_key,
-            "label": f"BuddyKey (余额 {result.get('balance', 0):.1f})",
-            "status": "active",
-            "used_count": 0,
-            "points": str(result.get("balance", 0)),
-            "points_updated_at": datetime.now().isoformat(),
-            "created_at": datetime.now().isoformat(),
-        })
-        self._proxy_page._invalidate_proxy_auth_cache()
+        class StartServiceThread(QThread):
+            done = QSignal(bool)
 
-        # 启动服务
+            def __init__(self, dashboard_page, buddy_key_str, balance_val):
+                super().__init__()
+                self._dashboard = dashboard_page
+                self._buddy_key = buddy_key_str
+                self._balance = balance_val
+
+            def run(self):
+                try:
+                    import secrets as _sec
+                    from datetime import datetime
+                    db = self._dashboard._proxy_page._db
+
+                    # 清除旧的上游 key
+                    for k in db.get_upstream_keys():
+                        db.delete_upstream_key(k.get("key_id", ""))
+
+                    db.add_upstream_key({
+                        "key_id": f"bk_{_sec.token_hex(4)}",
+                        "api_key": self._buddy_key,
+                        "label": f"BuddyKey (余额 {self._balance:.1f})",
+                        "status": "active",
+                        "used_count": 0,
+                        "points": str(self._balance),
+                        "points_updated_at": datetime.now().isoformat(),
+                        "created_at": datetime.now().isoformat(),
+                    })
+                    self._dashboard._proxy_page._invalidate_proxy_auth_cache()
+                    self.done.emit(True)
+                except Exception as e:
+                    logger.error(f"启动服务失败: {e}")
+                    self.done.emit(False)
+
+        self._start_service_thread = StartServiceThread(self, buddy_key, balance)
+        self._start_service_thread.done.connect(self._on_service_started)
+        self._start_service_thread.start()
+
+    def _on_service_started(self, success: bool):
+        """服务启动完成回调（在主线程执行）"""
+        if not success:
+            self._diag_title.setText("❌ 启动失败")
+            self._proxy_status_label.setText("⏹ 已停止")
+            self._proxy_status_label.setStyleSheet("font-weight: 600; color: #9BA4B0;")
+            self._toggle_proxy_btn.setEnabled(True)
+            self._close_diag_dialog()
+            QMessageBox.warning(self, "启动失败", "服务启动过程中发生错误")
+            return
+
+        # 启动代理服务（快速操作，不阻塞）
         self._proxy_page._toggle_service()
         self._toggle_proxy_btn.setEnabled(True)
         self._sync_proxy_status()
@@ -1280,4 +1383,8 @@ class DashboardPage(QWidget):
         self._apply_responsive_scale()
         self._sync_proxy_status()
         self._refresh_subkey_display()
-        self._refresh_data()
+        # 积分：首次打开从后端查询，后续切页面用本地缓存
+        if not self._credits_loaded:
+            self._refresh_credits()
+        else:
+            self._load_cached_credits()
