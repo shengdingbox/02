@@ -2,12 +2,10 @@
 
 import logging
 import os
-import subprocess
 import sys
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QSystemTrayIcon,
-    QMenu, QMessageBox, QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton,
-    QApplication,
+    QMenu, QMessageBox, QApplication,
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import Qt, QSize, Slot, QTimer
@@ -133,18 +131,10 @@ class MainWindow(QMainWindow):
         """初始化自动更新检查器"""
         self._updater = UpdateChecker(self)
         self._updater.update_available.connect(self._on_update_available)
-        self._updater.download_progress.connect(self._on_download_progress)
-        self._updater.update_finished.connect(self._on_update_finished)
         self._updater.no_update.connect(self._on_no_update)
 
         # 启动定期检查：首次5秒后检查，之后每1小时检查
         self._updater.start_periodic_check(3600_000)
-
-        # 更新对话框引用
-        self._update_dialog = None
-        self._update_progress_bar = None
-        self._pending_download_url = ""
-        self._pending_sha256 = ""
 
     def _on_update_available(self, version: str, changelog: str, download_url: str, sha256: str):
         """发现新版本 — 弹窗提示"""
@@ -181,110 +171,6 @@ class MainWindow(QMainWindow):
                 webbrowser.open(download_url)
             else:
                 QMessageBox.warning(self, "提示", "未获取到下载地址，请手动前往官网下载。")
-
-    def _start_download_update(self, download_url: str, sha256: str):
-        """显示下载进度对话框并开始下载"""
-        self._update_dialog = QDialog(self)
-        self._update_dialog.setWindowTitle("正在更新")
-        self._update_dialog.setFixedSize(420, 150)
-        self._update_dialog.setWindowFlags(
-            self._update_dialog.windowFlags() & ~Qt.WindowCloseButtonHint
-        )
-
-        layout = QVBoxLayout(self._update_dialog)
-        self._update_status_label = QLabel("正在下载更新包…")
-        self._update_status_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self._update_status_label)
-
-        self._update_progress_bar = QProgressBar()
-        self._update_progress_bar.setMinimum(0)
-        self._update_progress_bar.setMaximum(100)
-        self._update_progress_bar.setValue(0)
-        layout.addWidget(self._update_progress_bar)
-
-        self._update_dialog.show()
-
-        # 开始下载
-        self._updater.download_and_apply(download_url, sha256)
-
-    @Slot(int, int)
-    def _on_download_progress(self, downloaded: int, total: int):
-        """下载进度回调"""
-        if self._update_progress_bar and total > 0:
-            percent = int(downloaded * 100 / total)
-            self._update_progress_bar.setValue(percent)
-            mb_down = downloaded / (1024 * 1024)
-            mb_total = total / (1024 * 1024)
-            self._update_status_label.setText(
-                f"正在下载更新包… {mb_down:.1f}/{mb_total:.1f} MB"
-            )
-
-    @Slot(bool, str)
-    def _on_update_finished(self, success: bool, message: str):
-        """更新完成回调"""
-        # 关闭进度对话框
-        if self._update_dialog:
-            self._update_dialog.close()
-            self._update_dialog = None
-
-        if success:
-            if message == "UPDATE_NEED_RESTART":
-                # 打包模式：批处理已启动，直接退出让批处理接管
-                msg = QMessageBox(self)
-                msg.setWindowTitle("更新就绪")
-                msg.setIcon(QMessageBox.Icon.Information)
-                msg.setText("✅ 更新已下载完成！")
-                msg.setInformativeText("点击「确定」后将自动关闭并完成更新，请稍候片刻自动重启。")
-                msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                msg.exec()
-                # 批处理已经在等待进程退出，直接退出即可
-                QApplication.quit()
-                os._exit(0)
-            else:
-                # 源码模式：更新成功 — 提示重启
-                msg = QMessageBox(self)
-                msg.setWindowTitle("更新成功")
-                msg.setIcon(QMessageBox.Icon.Information)
-                msg.setText("✅ 更新已下载并安装完成！")
-                msg.setInformativeText("需要重启应用才能生效，是否立即重启？")
-                msg.setStandardButtons(
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-
-                if msg.exec() == QMessageBox.StandardButton.Yes:
-                    self._restart_app()
-        else:
-            QMessageBox.warning(self, "更新失败", f"❌ {message}")
-
-    def _restart_app(self):
-        """重启应用"""
-        try:
-            # 获取当前项目根目录
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-            # 确定启动命令
-            python_exe = sys.executable
-            if getattr(sys, 'frozen', False):
-                # 打包模式 — 直接重启 exe
-                subprocess.Popen([python_exe])
-            else:
-                # 开发模式 — 用 pythonw 启动
-                pythonw = python_exe.replace("python.exe", "pythonw.exe")
-                if not os.path.isfile(pythonw):
-                    pythonw = python_exe
-                subprocess.Popen(
-                    [pythonw, "-m", "src.main"],
-                    cwd=project_root,
-                    creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
-                )
-
-            # 退出当前进程
-            from PySide6.QtWidgets import QApplication
-            QApplication.instance().quit()
-        except Exception as e:
-            logger.error(f"重启应用失败: {e}")
-            QMessageBox.warning(self, "重启失败", f"请手动重启应用。\n错误: {e}")
 
     def _setup_ui(self):
         """构建主界面"""
