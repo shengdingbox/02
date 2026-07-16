@@ -46,13 +46,9 @@ class MainWindow(QMainWindow):
         self.apply_theme(self._current_theme)
 
         # 自动更新
-        # self._setup_updater()  # 自动更新暂时关闭
+        self._setup_updater()
 
-        # 自动签到：启动 5 秒后执行一次，之后每小时执行一次
-        self._checkin_timer = QTimer(self)
-        self._checkin_timer.setInterval(3600_000)  # 1 小时
-        self._checkin_timer.timeout.connect(self._auto_checkin)
-        QTimer.singleShot(5000, self._auto_checkin)  # 5 秒后首次签到
+        # 自动签到：已关闭
 
     def _update_version_suffix(self):
         """更新窗口标题中的版本号"""
@@ -179,9 +175,12 @@ class MainWindow(QMainWindow):
             return
 
         if result == QMessageBox.StandardButton.Yes:
-            self._pending_download_url = download_url
-            self._pending_sha256 = sha256
-            self._start_download_update(download_url, sha256)
+            # 打开浏览器跳转到下载地址
+            if download_url:
+                import webbrowser
+                webbrowser.open(download_url)
+            else:
+                QMessageBox.warning(self, "提示", "未获取到下载地址，请手动前往官网下载。")
 
     def _start_download_update(self, download_url: str, sha256: str):
         """显示下载进度对话框并开始下载"""

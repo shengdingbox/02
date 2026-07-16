@@ -2505,6 +2505,54 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         """覆盖默认日志"""
         logger.debug(f"Proxy: {format % args}")
 
+    def _refresh_buddykey(self) -> str:
+        """获取新的 BuddyKey 并替换当前上游 Key
+
+        Returns:
+            新的 api_key，失败返回空字符串
+        """
+        try:
+            from ..utils.server_api import get_buddykey
+            import secrets as _sec
+            from datetime import datetime
+
+            result = get_buddykey()
+            if not result or not result.get("success"):
+                err = (result or {}).get("error", "未知错误")
+                logger.warning(f"[BuddyKey刷新] 获取失败: {err}")
+                return ""
+
+            buddy_key = result.get("buddyKey", "")
+            if not buddy_key:
+                logger.warning("[BuddyKey刷新] 服务端未返回 buddyKey")
+                return ""
+
+            db = self.db
+            # 清除旧的上游 key
+            for k in db.get_upstream_keys():
+                db.delete_upstream_key(k.get("key_id", ""))
+
+            # 添加新的上游 key
+            db.add_upstream_key({
+                "key_id": f"bk_{_sec.token_hex(4)}",
+                "api_key": buddy_key,
+                "label": f"BuddyKey (余额 {result.get('balance', 0):.1f})",
+                "status": "active",
+                "used_count": 0,
+                "points": str(result.get("balance", 0)),
+                "points_updated_at": datetime.now().isoformat(),
+                "created_at": datetime.now().isoformat(),
+            })
+
+            # 刷新路由器缓存
+            self.router.invalidate_upstream_cache()
+
+            logger.info(f"[BuddyKey刷新] 已替换上游 Key，新余额: {result.get('balance', 0):.1f}")
+            return buddy_key
+        except Exception as e:
+            logger.error(f"[BuddyKey刷新] 异常: {e}")
+            return ""
+
     def _add_log(self, event: str, sub_key: dict = None, upstream_key: dict = None,
                  model: str = "", duration_ms: int = 0, error: str = "",
                  prompt_tokens: int = 0, completion_tokens: int = 0,
@@ -2846,11 +2894,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             request_data["model"] = model  # [v1.6.1-fix] 写回 request_data，否则白名单转发时上游收不到 model
         else:
             original_model = str(model).strip()
+            # 去掉模型前缀（生成配置时加的前缀，请求上游时需要去掉）
+            _prefix = self.db.get_settings().get("model_prefix", "")
+            if _prefix and original_model.startswith(_prefix):
+                original_model = original_model[len(_prefix):]
+                logger.info(f"[模型前缀] 去掉前缀 '{_prefix}' → {original_model}")
             aliased_model = MODEL_ID_ALIASES.get(original_model, original_model)
             if aliased_model != original_model:
                 logger.info(f"[模型别名] {original_model} -> {aliased_model}")
-                model = aliased_model
-                request_data["model"] = model
+            model = aliased_model
+            request_data["model"] = model
         # 与服务器端 chat.py 一致：messages 少于 2 条时补 system 消息
         # 上游 copilot.tencent.com 要求至少 2 条 message，否则返回 400
         messages = request_data.get("messages", [])
@@ -3034,6 +3087,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 logger.info(f"[代理] 上游响应 {int((time.time()-t_send)*1000)}ms, status={resp.status_code}, "
                            f"body={body_size//1024}KB, key={label}")
 
+                # 记录上游响应头到 1.log
+                try:
+                    with open("1.log", "a", encoding="utf-8") as _f:
+                        _f.write(f"\n{'='*60}\n")
+                        _f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 上游响应\n")
+                        _f.write(f"URL: {target_url}\n")
+                        _f.write(f"Status: {resp.status_code}\n")
+                        _f.write(f"Headers: {dict(resp.headers)}\n")
+                except Exception:
+                    pass
+
                 if resp.status_code != 200:
                     self.router.decrement_concurrent(key_id)
                     resp_body = resp.text
@@ -3072,9 +3136,20 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                             pass
 
                         if is_quota_exhausted:
-                            # 积分耗尽是永久的，不能自动恢复，标记为 exhausted
-                            self.router.mark_key_exhausted(key_id)
-                            error_detail = f"Key {label} 额度耗尽(429/14018): {resp_body[:200]}"
+                            # 额度耗尽 → 自动获取新的 BuddyKey 替换当前上游 Key
+                            logger.warning(f"[额度耗尽] Key {label} 额度耗尽(429/14018)，尝试获取新 BuddyKey")
+                            self._add_log(event="upstream_429", sub_key=sub_key, upstream_key=upstream_key,
+                                          model=model, error=f"额度耗尽，正在获取新 BuddyKey", upstream_status=429)
+                            new_key = self._refresh_buddykey()
+                            if new_key:
+                                logger.info(f"[额度耗尽] 已获取新 BuddyKey，重试请求")
+                                # 清除已尝试的 key，让重试循环用新 key
+                                tried_key_ids.clear()
+                                continue
+                            else:
+                                logger.warning(f"[额度耗尽] 获取新 BuddyKey 失败，标记 Key 为 exhausted")
+                                self.router.mark_key_exhausted(key_id)
+                                error_detail = f"Key {label} 额度耗尽且获取新 BuddyKey 失败: {resp_body[:200]}"
                         else:
                             # 临时限流：模型级冷却 + 渐进退避（优化项 #8/#10）
                             cooldown_secs = self.router.mark_model_cooldown(key_id, model)

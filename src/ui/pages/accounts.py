@@ -45,7 +45,7 @@ class AddAccountDialog(QDialog):
 
     account_added = Signal(Account)
 
-    REDEEM_URL = "http://47.83.145.136:8787/api/redeem"
+    REDEEM_URL = "https://buddy.shengdingit.com/api/redeem"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -906,25 +906,20 @@ class AccountsPage(QWidget):
         pass
 
     def _update_quota_card(self):
-        """更新积分包余额进度条（从服务端查询）"""
-        self._quota_value_label.setText("⏳")
-        self._quota_packages_label.setText("查询中...")
-        self._quota_badge_label.setText("--")
-        self._quota_progress.setValue(0)
-
-        from PySide6.QtCore import QThread, Signal as QSignal
-
-        class CreditsThread(QThread):
-            done = QSignal(object)
-
-            def run(self):
-                from ...utils.server_api import get_credits
-                result = get_credits()
-                self.done.emit(result)
-
-        self._credits_thread = CreditsThread()
-        self._credits_thread.done.connect(self._on_credits_done)
-        self._credits_thread.start()
+        """更新积分包余额（从本地缓存读取，不请求后端）"""
+        try:
+            from ...modules.proxy_server import ProxyDatabase
+            db = ProxyDatabase.get_instance()
+            cached = db.get_cached_credits()
+            if cached and "credits" in cached:
+                self._on_credits_done(cached)
+            else:
+                self._quota_value_label.setText("--")
+                self._quota_packages_label.setText("暂无数据")
+                self._quota_badge_label.setText("--")
+                self._quota_progress.setValue(0)
+        except Exception:
+            pass
 
     def _on_credits_done(self, result: dict):
         """积分查询完成"""

@@ -1,6 +1,6 @@
-"""使用量上报管理器 — 本地缓存 + 后台上报
+"""使用量上报管理器 — 本地缓存 + 加密存储 + 后台上报
 
-对话结束时生成缓存文件记录未上报数据，后台提交后删除对应缓存。
+对话结束时生成缓存文件记录未上报数据（加密存储，.dll 后缀），后台提交后删除对应缓存。
 应用启动时扫描缓存目录，补交未上报的记录。
 """
 
@@ -8,14 +8,43 @@ import os
 import json
 import time
 import uuid
+import base64
 import logging
 import threading
 from pathlib import Path
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger(__name__)
 
 # 缓存目录: ~/.buddy-tool/usage_pending/
 _CACHE_DIR = Path.home() / ".buddy-tool" / "usage_pending"
+
+# 加密密钥（AES-256-GCM，与服务端一致）
+_AES_KEY = bytes.fromhex("38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0")
+
+
+def _encrypt(data: dict) -> bytes:
+    """AES-256-GCM 加密 dict → 二进制"""
+    plaintext = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(_AES_KEY)
+    ct_and_tag = aesgcm.encrypt(nonce, plaintext, associated_data=None)
+    # 格式: nonce(12) + tag(16) + ciphertext
+    ciphertext = ct_and_tag[:-16]
+    tag = ct_and_tag[-16:]
+    return nonce + tag + ciphertext
+
+
+def _decrypt(raw: bytes) -> dict:
+    """AES-256-GCM 解密二进制 → dict"""
+    nonce = raw[:12]
+    tag = raw[12:28]
+    ciphertext = raw[28:]
+    ct_and_tag = ciphertext + tag
+    aesgcm = AESGCM(_AES_KEY)
+    plaintext = aesgcm.decrypt(nonce, ct_and_tag, associated_data=None)
+    return json.loads(plaintext.decode("utf-8"))
 
 
 def _ensure_cache_dir():
@@ -35,7 +64,7 @@ def add_pending_report(
     response_tokens: int = 0,
     upstream_id: str = "",
 ) -> str:
-    """将一条使用记录写入本地缓存文件
+    """将一条使用记录写入本地缓存文件（加密存储，.dll 后缀）
 
     Args:
         credits_used: 消耗积分
@@ -62,9 +91,9 @@ def add_pending_report(
         "created_at": time.time(),
     }
 
-    file_path = _CACHE_DIR / f"{record['record_id']}.json"
+    file_path = _CACHE_DIR / f"{record['record_id']}.dll"
     try:
-        file_path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        file_path.write_bytes(_encrypt(record))
         logger.debug(f"[上报] 缓存记录: {file_path.name}")
     except Exception as e:
         logger.error(f"[上报] 写入缓存失败: {e}")
@@ -82,7 +111,7 @@ def _report_one(file_path: Path) -> bool:
         True=上报成功（文件已删除），False=失败（文件保留）
     """
     try:
-        record = json.loads(file_path.read_text(encoding="utf-8"))
+        record = _decrypt(file_path.read_bytes())
     except Exception as e:
         logger.error(f"[上报] 读取缓存失败，删除损坏文件: {file_path.name} - {e}")
         try:
@@ -135,7 +164,7 @@ def flush_pending_reports():
     """
     _ensure_cache_dir()
 
-    pending_files = sorted(_CACHE_DIR.glob("*.json"))
+    pending_files = sorted(_CACHE_DIR.glob("*.dll"))
     if not pending_files:
         return
 

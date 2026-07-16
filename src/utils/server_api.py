@@ -1,6 +1,6 @@
 """服务端 API 客户端 — 积分查询、卡密兑换等
 
-与 http://47.83.145.136:8787 通信，支持 AES-256-GCM 加密传输 + HMAC-SHA256 签名。
+与 https://buddy.shengdingit.com/api 通信，支持 AES-256-GCM 加密传输 + HMAC-SHA256 签名。
 """
 
 import json
@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger(__name__)
 
-SERVER_BASE = "http://47.83.145.136:8787"
+SERVER_BASE = "https://buddy.shengdingit.com/api"
 
 # AES-256-GCM 密钥（与服务端一致，hex → 32 字节）
 _AES_KEY_HEX = "38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0"
@@ -130,7 +130,7 @@ def get_credits(user_key: str = None) -> dict:
     from .machine import get_machine_code
 
     key = user_key or get_machine_code()
-    url = f"{SERVER_BASE}/api/user/credits"
+    url = f"{SERVER_BASE}/user/credits"
     payload = {"userKey": key}
 
     try:
@@ -166,7 +166,7 @@ def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:
     from .machine import get_machine_code
 
     key = user_key or get_machine_code()
-    url = f"{SERVER_BASE}/api/redeem"
+    url = f"{SERVER_BASE}/redeem"
 
     payload = {
         "cardKey": card_key,
@@ -203,7 +203,7 @@ def get_buddykey(user_key: str = None) -> dict:
     from .machine import get_machine_code
 
     key = user_key or get_machine_code()
-    url = f"{SERVER_BASE}/api/buddykey/get"
+    url = f"{SERVER_BASE}/buddykey/get"
 
     payload = {"userKey": key}
 
@@ -220,6 +220,60 @@ def get_buddykey(user_key: str = None) -> dict:
     except Exception as e:
         logger.error(f"获取 BuddyKey 失败: {e}")
         return {"success": False, "message": str(e)}
+
+
+def check_version(current_version: str = "", platform: str = "win") -> dict:
+    """检查新版本（POST 加密接口）
+
+    Args:
+        current_version: 当前版本号，为空时从 src/VERSION 读取
+        platform: 平台 (win/mac/linux/all)
+
+    Returns:
+        {
+            "has_update": bool,
+            "version": str,
+            "latest_version": str,
+            "platform": str,
+            "download_url": str,
+            "changelog": str,
+            "min_version": str,
+            "is_force_update": bool,
+            "created_at": str,
+        }
+        失败时返回 {"error": "..."}
+    """
+    import sys as _sys
+
+    if not current_version:
+        from ..modules.updater import get_current_version
+        current_version = get_current_version()
+
+    if platform == "win":
+        platform = "win" if _sys.platform == "win32" else ("mac" if _sys.platform == "darwin" else "linux")
+
+    url = f"{SERVER_BASE}/version/check"
+    payload = {
+        "platform": platform,
+        "current_version": current_version,
+    }
+
+    try:
+        encrypted_body = _encrypt_body(payload)
+        resp = requests.post(
+            url,
+            data=encrypted_body,
+            headers=_build_signed_headers(),
+            timeout=15,
+            proxies=_NO_PROXY,
+        )
+        if resp.ok:
+            return _decrypt_body(resp.text)
+        else:
+            return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+    except Exception as e:
+        logger.error(f"检查版本失败: {e}")
+        return {"error": str(e)}
 
 
 def report_usage(
@@ -245,7 +299,7 @@ def report_usage(
     Returns:
         {"success": true, "device_fingerprint": "...", "credits_used": ..., "balance_before": ..., "balance_after": ..., "report_id": int}
     """
-    url = f"{SERVER_BASE}/api/usage/report"
+    url = f"{SERVER_BASE}/usage/report"
 
     payload = {
         "device_fingerprint": device_fingerprint,

@@ -384,47 +384,92 @@ POST /api/activate
 
 ---
 
+### 7. 版本检查
+
+```
+POST /api/version/check
+```
+
+**请求体**（必须加密）:
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| platform | string | 否 | 平台 (win/mac/linux/all)，默认 win |
+| current_version | string | 否 | 当前版本号 |
+
+**响应**（加密，解密后）:
+```json
+{
+  "has_update": true,
+  "version": "1.1.0",
+  "latest_version": "1.1.0",
+  "platform": "win",
+  "download_url": "https://example.com/download/v1.1.0.exe",
+  "changelog": "1. 新增签到功能\n2. 修复已知问题",
+  "min_version": "1.0.0",
+  "is_force_update": false,
+  "created_at": "2026-07-16T10:00:00+00:00"
+}
+```
+
+---
+
 ## 管理接口（需鉴权）
 
 > 所有管理接口需携带请求头: `Authorization: Bearer <ADMIN_API_KEY>`
-> 默认 ADMIN_API_KEY: `admin`
+> 默认 ADMIN_API_KEY: `xiaobaobuddy`
 
 ### 卡密管理
 
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
 | 1 | POST | `/api/admin/cards` | 创建卡密（body: `{"initialCredits": 1000}`） |
-| 2 | GET | `/api/admin/cards?limit=20&offset=0` | 卡密列表 |
-| 3 | GET | `/api/admin/cards/:key` | 卡密详情 |
-| 4 | POST | `/api/admin/cards/:key/recharge` | 卡密充值（body: `{"credits": 100}`） |
+| 2 | POST | `/api/admin/cards/batch` | 批量创建卡密（body: `{"count": 5, "initialCredits": 1000}`） |
+| 3 | GET | `/api/admin/cards?limit=20&offset=0` | 卡密列表 |
+| 4 | GET | `/api/admin/cards/:key` | 卡密详情 |
+| 5 | POST | `/api/admin/cards/:key/recharge` | 卡密充值（body: `{"credits": 100}`） |
+| 6 | DELETE | `/api/admin/cards/:key` | 删除卡密 |
 
 ### 兑换记录
 
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
-| 5 | GET | `/api/admin/redeem-records?limit=20&offset=0&userKey=&cardKey=` | 兑换记录列表 |
+| 7 | GET | `/api/admin/redeem-records?limit=20&offset=0&userKey=&cardKey=` | 兑换记录列表 |
 
 ### 机器码管理
 
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
-| 6 | GET | `/api/admin/machines?limit=20&offset=0&search=` | 机器码列表（含兑换汇总） |
-| 7 | GET | `/api/admin/machines/:key` | 机器码详情（含最近10条兑换） |
-| 8 | POST | `/api/admin/machines/:key/recharge` | 机器码充值（body: `{"credits": 100}`） |
+| 8 | GET | `/api/admin/machines?limit=20&offset=0&search=` | 机器码列表（含兑换汇总） |
+| 9 | GET | `/api/admin/machines/:key` | 机器码详情（含最近10条兑换） |
+| 10 | POST | `/api/admin/machines/:key/recharge` | 机器码充值（body: `{"credits": 100}`） |
 
 ### BuddyKey 管理
 
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
-| 9 | GET | `/api/admin/buddy-keys?limit=20&offset=0&status=&search=` | BuddyKey列表 |
-| 10 | POST | `/api/admin/buddy-keys/:id/balance` | 修改余额（body: `{"balance": 50}`） |
-| 11 | DELETE | `/api/admin/buddy-keys/:id` | 删除BuddyKey |
+| 11 | GET | `/api/admin/buddy-keys?limit=20&offset=0&status=&search=` | BuddyKey列表 |
+| 12 | POST | `/api/admin/buddy-keys/:id/balance` | 修改余额（body: `{"balance": 50}`） |
+| 13 | POST | `/api/admin/buddy-keys/:id/refresh` | 刷新单个上游积分 |
+| 14 | POST | `/api/admin/buddy-keys/:id/checkin` | 单个签到 |
+| 15 | POST | `/api/admin/buddy-keys/refresh-all` | 全部刷新积分 |
+| 16 | POST | `/api/admin/buddy-keys/checkin-all` | 全部签到 |
+| 17 | DELETE | `/api/admin/buddy-keys/:id` | 删除BuddyKey |
 
 ### 使用记录
 
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
-| 12 | GET | `/api/admin/usage-reports?limit=20&offset=0&device=&search=` | 使用记录列表 |
+| 18 | GET | `/api/admin/usage-reports?limit=20&offset=0&device=&search=` | 使用记录列表 |
+
+### 版本管理
+
+| # | 方法 | 路径 | 说明 |
+|---|------|------|------|
+| 19 | GET | `/api/admin/versions?limit=20&offset=0&platform=` | 版本列表 |
+| 20 | POST | `/api/admin/versions` | 创建版本 |
+| 21 | POST | `/api/admin/versions/:id` | 编辑版本 |
+| 22 | DELETE | `/api/admin/versions/:id` | 删除版本 |
 
 ---
 
@@ -437,7 +482,8 @@ POST /api/activate
 | `/usagereports/` | 使用记录 | 管理后台查看使用上报 |
 | `/machines/` | 机器码管理 | 管理后台管理机器码额度 |
 | `/buddykeys/` | BuddyKey管理 | 管理后台管理激活码 |
-| `/admin/` | 卡密管理 | 管理后台创建/充值卡密 |
+| `/versions/` | 版本管理 | 管理后台管理版本发布 |
+| `/xiaofeibuddy/` | 卡密管理 | 管理后台创建/充值/删除卡密 |
 
 ---
 
@@ -458,6 +504,5 @@ Access-Control-Allow-Headers: Authorization, Content-Type, x-api-key
 
 ### 加密兼容性
 
-- **请求**: 公开 POST 接口（`/api/redeem`、`/api/buddykey/get`、`/api/usage/report`）**必须**使用加密格式 `{"data": "<base64>"}`，明文请求会被拒绝（返回 400 错误）
-- **响应**: 加密接口的响应始终为加密格式（响应头 `X-Encrypted: 1`）
+- **加密接口**: `/api/redeem`、`/api/buddykey/get`、`/api/usage/report`、`/api/user/credits`、`/api/version/check` — 请求必须加密，响应加密返回
 - **明文接口**: `GET /api/user/today-usage`、`POST /api/activate`、所有管理接口使用明文 JSON

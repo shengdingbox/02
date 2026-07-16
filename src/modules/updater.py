@@ -368,12 +368,43 @@ def _fetch_server_version(timeout: int = 10) -> dict | None:
 
 
 def _fetch_version_info(timeout: int = 15) -> dict | None:
-    """获取版本信息 — 服务器优先，GitHub 兜底
+    """获取版本信息 — 服务端版本接口优先，服务器 version.json 次之，GitHub 兜底
 
-    服务器拿到版本信息后，额外查 GitHub 补充 src_download_url 作为下载备选。
-    这样下载增量包时优先用国内服务器链接（快），失败再切 GitHub 链接。
+    服务端 /api/version/check 返回 has_update / download_url / changelog 等，
+    检测到新版本后由 UI 层打开浏览器跳转 download_url。
     """
-    # 1. 先查国内服务器（下载快）
+    # 0. 优先查服务端版本检查接口（加密 POST）
+    try:
+        from ..utils.server_api import check_version
+        current = get_current_version()
+        platform_key = _get_platform_key()
+        # server_api 用 win/mac/linux，_get_platform_key 返回 windows/mac
+        api_platform = "mac" if platform_key == "mac" else "win"
+        ver_info = check_version(current_version=current, platform=api_platform)
+        if ver_info and not ver_info.get("error") and ver_info.get("has_update"):
+            download_url = str(ver_info.get("download_url", "")).strip()
+            latest_ver = str(ver_info.get("latest_version") or ver_info.get("version", "")).strip()
+            changelog = str(ver_info.get("changelog", ""))
+            if latest_ver and download_url:
+                logger.info(f"服务端版本检查: {current} → {latest_ver}（源: API）")
+                return {
+                    "version": latest_ver,
+                    "platforms": {
+                        platform_key: {
+                            "version": latest_ver,
+                            "changelog": changelog,
+                            "download_url": download_url,
+                            "src_download_url": "",
+                            "sha256": "",
+                            "src_sha256": "",
+                        }
+                    },
+                    "source": "api",
+                }
+    except Exception as e:
+        logger.warning(f"服务端版本检查接口失败: {e}")
+
+    # 1. 查国内服务器（下载快）
     info = _fetch_server_version(timeout=timeout)
     if info:
         platform_key = _get_platform_key()

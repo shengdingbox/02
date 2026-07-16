@@ -5,7 +5,7 @@ import logging
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QFrame,
     QPushButton, QButtonGroup, QApplication, QScrollArea, QSpinBox, QComboBox,
-    QMessageBox, QCheckBox, QProgressBar, QDialog
+    QMessageBox, QCheckBox, QProgressBar, QDialog, QLineEdit
 )
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPalette
@@ -184,6 +184,68 @@ class CacheHitRateChart(QWidget):
         painter.end()
 
 
+class CheckableBox(QCheckBox):
+    """自定义复选框 — 用 QPainter 绘制清晰的对勾"""
+
+    def __init__(self, text: str, accent_color: str, border_color: str, text_color: str, parent=None):
+        super().__init__(text, parent)
+        self._accent = accent_color
+        self._border = border_color
+        self._text_color = text_color
+        self.setStyleSheet(f"""
+            QCheckBox {{
+                color: {text_color};
+                font-size: 13px;
+                spacing: 8px;
+                padding: 4px 0;
+            }}
+        """)
+
+    def paintEvent(self, event):
+        """自绘：文字正常绘制，indicator 手动绘制对勾"""
+        from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush
+        from PySide6.QtCore import QRect, Qt, QPoint, QLineF
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 绘制 indicator 方框
+        box_size = 18
+        box_y = (self.height() - box_size) // 2
+        box_rect = QRect(0, box_y, box_size, box_size)
+
+        if self.isChecked():
+            # 蓝色背景
+            painter.setBrush(QBrush(QColor(self._accent)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(box_rect, 4, 4)
+
+            # 白色对勾
+            pen = QPen(QColor("#FFFFFF"), 2.5)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            # 对勾路径: (4,9) → (8,13) → (14,5)
+            painter.drawLine(QLineF(4, box_y + 9, 8, box_y + 13))
+            painter.drawLine(QLineF(8, box_y + 13, 14, box_y + 5))
+        else:
+            # 透明背景 + 灰色边框
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            pen = QPen(QColor(self._border), 2)
+            painter.setPen(pen)
+            painter.drawRoundedRect(box_rect, 4, 4)
+
+        # 绘制文字
+        text_rect = QRect(box_size + 8, 0, self.width() - box_size - 8, self.height())
+        painter.setPen(QColor(self._text_color))
+        font = QFont()
+        font.setPixelSize(13)
+        painter.setFont(font)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+
+        painter.end()
+
+
 class DashboardPage(QWidget):
     """仪表盘页面 — 纯本地数据概览，不自动发网络请求，支持响应式缩放"""
 
@@ -350,7 +412,7 @@ class DashboardPage(QWidget):
         # 服务 URL 显示
         proxy_url_row = QHBoxLayout()
         proxy_url_row.addWidget(QLabel("接口地址:"))
-        self._proxy_url_label = QLabel("http://127.0.0.1:8002/v1/chat/completions")
+        self._proxy_url_label = QLabel(f"http://127.0.0.1:{int(load_setting('proxy_port', '8002'))}/v1/chat/completions")
         self._proxy_url_label.setStyleSheet("color: #2B6CB0; font-weight: 600; font-size: 13px;")
         self._proxy_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         proxy_url_row.addWidget(self._proxy_url_label)
@@ -428,6 +490,8 @@ class DashboardPage(QWidget):
         import getpass
         _username = getpass.getuser()
 
+        # 模型前缀输入框（放到复制配置前面的 action_row 中）
+
         client_title = QLabel("选择目标客户端（可多选）")
         client_title.setStyleSheet(
             f"font-size: 13px; font-weight: 600; color: {self._colors['text_primary']};"
@@ -435,46 +499,28 @@ class DashboardPage(QWidget):
         proxy_ctrl_layout.addWidget(client_title)
 
         # 复选框样式 — 带对号
-        _chk_style = f"""
-            QCheckBox {{
-                color: {self._colors['text_primary']};
-                font-size: 13px;
-                spacing: 8px;
-                padding: 4px 0;
-            }}
-            QCheckBox::indicator {{
-                width: 18px;
-                height: 18px;
-                border: 2px solid {self._colors['border']};
-                border-radius: 4px;
-                background-color: transparent;
-            }}
-            QCheckBox::indicator:hover {{
-                border-color: {self._colors['accent']};
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {self._colors['accent']};
-                border-color: {self._colors['accent']};
-                image: none;
-            }}
-        """
-
         # WorkBuddy
-        self._chk_workbuddy = QCheckBox(f"WorkBuddy  腾讯代码助手桌面版  ✓ C:\\Users\\{_username}\\.workbuddy")
+        self._chk_workbuddy = CheckableBox(
+            f"WorkBuddy  腾讯代码助手桌面版  ✓ C:\\Users\\{_username}\\.workbuddy",
+            self._colors['accent'], self._colors['border'], self._colors['text_primary']
+        )
         self._chk_workbuddy.setChecked(load_setting("config_target_workbuddy", "true") == "true")
-        self._chk_workbuddy.setStyleSheet(_chk_style)
         proxy_ctrl_layout.addWidget(self._chk_workbuddy)
 
         # CodeBuddy
-        self._chk_codebuddy = QCheckBox(f"CodeBuddy  腾讯云 AI IDE 插件  ✓ C:\\Users\\{_username}\\.codebuddy")
+        self._chk_codebuddy = CheckableBox(
+            f"CodeBuddy  腾讯云 AI IDE 插件  ✓ C:\\Users\\{_username}\\.codebuddy",
+            self._colors['accent'], self._colors['border'], self._colors['text_primary']
+        )
         self._chk_codebuddy.setChecked(load_setting("config_target_codebuddy", "true") == "true")
-        self._chk_codebuddy.setStyleSheet(_chk_style)
         proxy_ctrl_layout.addWidget(self._chk_codebuddy)
 
         # 自动备份 + 打开备份目录
-        self._chk_auto_backup = QCheckBox("配置前自动备份原文件（推荐）")
+        self._chk_auto_backup = CheckableBox(
+            "配置前自动备份原文件（推荐）",
+            self._colors['accent'], self._colors['border'], self._colors['text_primary']
+        )
         self._chk_auto_backup.setChecked(load_setting("config_auto_backup", "true") == "true")
-        self._chk_auto_backup.setStyleSheet(_chk_style)
 
         backup_row = QHBoxLayout()
         backup_row.addWidget(self._chk_auto_backup)
@@ -499,6 +545,30 @@ class DashboardPage(QWidget):
 
         # 底部按钮：复制配置 / 删除配置 / 立即配置
         action_row = QHBoxLayout()
+
+        # 模型前缀输入框（短小，放在复制配置前）
+        prefix_label = QLabel("模型前缀:")
+        prefix_label.setStyleSheet("font-size: 12px; font-weight: 600;")
+        action_row.addWidget(prefix_label)
+        self._model_prefix_input = QLineEdit()
+        self._model_prefix_input.setPlaceholderText("不知道这是啥 不要动")
+        self._model_prefix_input.setText(load_setting("model_prefix", ""))
+        self._model_prefix_input.setFixedWidth(160)
+        self._model_prefix_input.setStyleSheet(f"""
+            QLineEdit {{
+                border: 2px solid #E53E3E;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 12px;
+                color: {self._colors['text_primary']};
+                background-color: {self._colors['bg_secondary']};
+            }}
+            QLineEdit::placeholder {{
+                color: #E53E3E;
+            }}
+        """)
+        action_row.addWidget(self._model_prefix_input)
+
         action_row.addStretch()
 
         btn_copy_config = QPushButton("复制配置")
@@ -781,6 +851,10 @@ class DashboardPage(QWidget):
 
     def _refresh_credits(self):
         """从后端查询积分余额并更新本地缓存"""
+        # 防止重复创建线程
+        if hasattr(self, '_credits_thread') and self._credits_thread and self._credits_thread.isRunning():
+            return
+
         self._btn_refresh_credits.setEnabled(False)
         self._quota_value_label.setText("⏳")
         self._quota_packages_label.setText("查询中...")
@@ -799,6 +873,7 @@ class DashboardPage(QWidget):
 
         self._credits_thread = CreditsThread()
         self._credits_thread.done.connect(self._on_credits_done)
+        self._credits_thread.finished.connect(lambda: setattr(self, '_credits_thread', None))
         self._credits_thread.start()
 
     def _on_credits_done(self, result: dict):
@@ -961,6 +1036,15 @@ class DashboardPage(QWidget):
             self._sync_proxy_status()
             return
 
+        # 服务未运行 → 同步模型前缀到 ProxyDatabase
+        model_prefix = self._model_prefix_input.text().strip()
+        save_setting("model_prefix", model_prefix)
+        try:
+            db = ProxyDatabase.get_instance()
+            db.update_settings({"model_prefix": model_prefix})
+        except Exception:
+            pass
+
         # 服务未运行 → 显示诊断弹窗
         port = self._port_spin.value()
         self._show_diag_dialog(port)
@@ -989,6 +1073,7 @@ class DashboardPage(QWidget):
 
         self._buddykey_thread = BuddyKeyThread()
         self._buddykey_thread.done.connect(self._on_buddykey_done)
+        self._buddykey_thread.finished.connect(lambda: setattr(self, '_buddykey_thread', None))
         self._buddykey_thread.start()
 
     def _on_buddykey_done(self, result: dict):
@@ -1055,6 +1140,7 @@ class DashboardPage(QWidget):
 
         self._start_service_thread = StartServiceThread(self, buddy_key, balance)
         self._start_service_thread.done.connect(self._on_service_started)
+        self._start_service_thread.finished.connect(lambda: setattr(self, '_start_service_thread', None))
         self._start_service_thread.start()
 
     def _on_service_started(self, success: bool):
@@ -1190,15 +1276,45 @@ class DashboardPage(QWidget):
         save_setting("config_target_workbuddy", "true" if self._chk_workbuddy.isChecked() else "false")
         save_setting("config_target_codebuddy", "true" if self._chk_codebuddy.isChecked() else "false")
         save_setting("config_auto_backup", "true" if self._chk_auto_backup.isChecked() else "false")
+        model_prefix = self._model_prefix_input.text().strip()
+        save_setting("model_prefix", model_prefix)
+        # 同步写入 ProxyDatabase，代理服务请求上游时用这个去掉前缀
+        try:
+            db = ProxyDatabase.get_instance()
+            db.update_settings({"model_prefix": model_prefix})
+        except Exception:
+            pass
 
     def _build_config_json(self) -> str:
         """根据当前端口、子 API Key 和 SUPPORTED_MODELS 生成配置 JSON"""
         import json
+        import secrets as _sec
+        from datetime import datetime
         from ...modules.proxy_server import SUPPORTED_MODELS, MODEL_CONTEXT_LENGTHS, MODEL_MAX_OUTPUT_TOKENS
 
         port = self._port_spin.value()
         sub_keys = self._proxy_page._db.get_sub_api_keys() if self._proxy_page else []
         api_key = sub_keys[0].get("api_key", "") if sub_keys else ""
+
+        # 如果没有子 API Key，自动生成一个
+        if not api_key and self._proxy_page:
+            api_key = f"sk-{_sec.token_urlsafe(32)}"
+            self._proxy_page._db.add_sub_api_key({
+                "key_id": f"sk_{_sec.token_hex(4)}",
+                "api_key": api_key,
+                "label": "",
+                "is_active": True,
+                "allowed_models": [],
+                "allowed_key_ids": [],
+                "max_usage": 0,
+                "used_count": 0,
+                "rate_limit_rpm": 1000,
+                "key_mode": 1,
+                "created_at": datetime.now().isoformat(),
+            })
+            self._proxy_page._invalidate_proxy_auth_cache()
+            self._refresh_subkey_display()
+
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
 
         # 模型名称映射
@@ -1229,10 +1345,13 @@ class DashboardPage(QWidget):
             "hunyuan-2.0-thinking": "Hunyuan 2.0 Thinking",
         }
 
+        # 模型前缀
+        prefix = self._model_prefix_input.text().strip()
+
         models = []
         for m in SUPPORTED_MODELS:
             models.append({
-                "id": m,
+                "id": f"{prefix}{m}" if prefix else m,
                 "name": _name_map.get(m, m),
                 "vendor": "Buddy",
                 "apiKey": api_key,
