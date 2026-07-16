@@ -33,6 +33,7 @@ venv\Scripts\python.exe -m nuitka ^
     --enable-plugin=pyside6 ^
     --include-data-dir=assets=assets ^
     --include-data-dir=src\i18n=src\i18n ^
+    --include-data-file=src\VERSION=src\VERSION ^
     --output-dir=dist ^
     --output-filename="BuddyTool.exe" ^
     --assume-yes-for-downloads ^

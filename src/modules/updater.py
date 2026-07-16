@@ -42,9 +42,40 @@ VERSION_FILE = Path(__file__).parent.parent / "VERSION"
 
 
 def get_current_version() -> str:
-    """读取本地版本号"""
-    if VERSION_FILE.exists():
-        return VERSION_FILE.read_text(encoding="utf-8").strip()
+    """读取本地版本号
+
+    源码模式: src/VERSION（项目根目录下）
+    打包模式: Nuitka onefile 解压后 VERSION 通过 --include-data-file 打包进来
+    """
+    # 收集所有可能的 VERSION 路径
+    candidates = [
+        VERSION_FILE,                                    # 源码: <root>/src/VERSION
+        Path(__file__).parent / "VERSION",               # 同目录
+        Path(__file__).parent.parent / "VERSION",        # src/VERSION
+        Path(__file__).parent.parent.parent / "VERSION", # 根目录 VERSION
+    ]
+    # 打包模式：从可执行文件目录查找
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).parent
+        candidates.extend([
+            exe_dir / "src" / "VERSION",
+            exe_dir / "VERSION",
+        ])
+    # Nuitka onefile: 临时解压目录
+    if hasattr(sys, "_MEIPASS"):
+        meipass = Path(sys._MEIPASS)
+        candidates.extend([
+            meipass / "src" / "VERSION",
+            meipass / "VERSION",
+        ])
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                ver = candidate.read_text(encoding="utf-8").strip()
+                if ver:
+                    return ver
+        except Exception:
+            continue
     return "0.0.0"
 
 
