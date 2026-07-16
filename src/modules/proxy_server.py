@@ -3087,17 +3087,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 logger.info(f"[代理] 上游响应 {int((time.time()-t_send)*1000)}ms, status={resp.status_code}, "
                            f"body={body_size//1024}KB, key={label}")
 
-                # 记录上游响应头到 1.log
-                try:
-                    with open("1.log", "a", encoding="utf-8") as _f:
-                        _f.write(f"\n{'='*60}\n")
-                        _f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 上游响应\n")
-                        _f.write(f"URL: {target_url}\n")
-                        _f.write(f"Status: {resp.status_code}\n")
-                        _f.write(f"Headers: {dict(resp.headers)}\n")
-                except Exception:
-                    pass
-
                 if resp.status_code != 200:
                     self.router.decrement_concurrent(key_id)
                     resp_body = resp.text
