@@ -1433,6 +1433,17 @@ class DashboardPage(QWidget):
             QMessageBox.warning(self, "提示", "请先勾选目标客户端")
             return
 
+        # 确认弹窗
+        client_names = ' + '.join(name for name, _ in targets)
+        reply = QMessageBox.question(
+            self, "确认配置",
+            f"是否立即配置并重启 {client_names}？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
         # 自动备份
         if self._chk_auto_backup.isChecked():
             backup_root = Path.home() / ".buddy-tool" / "config_backups"
@@ -1458,10 +1469,59 @@ class DashboardPage(QWidget):
                 logger.error(f"配置 {name} 失败: {e}")
 
         if success_clients:
-            QMessageBox.information(
-                self, "配置完成",
-                f"已配置 {' + '.join(success_clients)}！\n请重启对应的客户端使配置生效。"
-            )
+            # 如果勾选了 WorkBuddy，后台配置调试端口并重启
+            if self._chk_workbuddy.isChecked():
+                from PySide6.QtCore import QThread, Signal as QSignal
+
+                class _WorkbuddySetupThread(QThread):
+                    done = QSignal(bool, str)
+
+                    def run(self):
+                        try:
+                            from ...utils.setup_debug_port import setup_and_restart
+                            ok, msg = setup_and_restart()
+                            self.done.emit(ok, msg)
+                        except Exception as e:
+                            self.done.emit(False, str(e))
+
+                self._workbuddy_setup_thread = _WorkbuddySetupThread()
+                self._workbuddy_setup_thread.done.connect(self._on_workbuddy_setup_done)
+                self._workbuddy_setup_thread.finished.connect(
+                    lambda: setattr(self, '_workbuddy_setup_thread', None)
+                )
+                self._workbuddy_setup_thread.start()
+            else:
+                # 没勾选 WorkBuddy，直接弹提示
+                QMessageBox.information(self, "提示", "配置已更新，请启动服务开始使用")
+
+    def _on_workbuddy_setup_done(self, ok: bool, msg: str):
+        """WorkBuddy 调试端口配置完成 — 等待 WorkBuddy 启动后弹提示"""
+        from PySide6.QtCore import QThread, Signal as QSignal
+
+        class _WaitWorkbuddyThread(QThread):
+            """等待 WorkBuddy 启动（检测 CDP 端口），最多5秒"""
+            done = QSignal()
+
+            def run(self):
+                import time
+                import urllib.request
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    try:
+                        urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=1).read()
+                        break
+                    except Exception:
+                        time.sleep(0.5)
+                self.done.emit()
+
+        self._wait_workbuddy_thread = _WaitWorkbuddyThread()
+        self._wait_workbuddy_thread.done.connect(lambda: QMessageBox.information(
+            self, "提示", "配置已更新，请启动服务开始使用"
+        ))
+        self._wait_workbuddy_thread.finished.connect(
+            lambda: setattr(self, '_wait_workbuddy_thread', None)
+        )
+        self._wait_workbuddy_thread.start()
 
     def _on_port_changed(self):
         """端口变化时更新 URL 显示"""

@@ -130,16 +130,13 @@ class UpdateChecker(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self.check_update)
         self._checking = False
         self._manual_check = False
         self._notified_version = ""
 
     def start_periodic_check(self, interval_ms: int = 3600_000):
-        """启动定期检查（默认1小时）"""
+        """启动时检查一次（不再定时轮询）"""
         QTimer.singleShot(5000, self.check_update)
-        self._timer.start(interval_ms)
 
     def stop(self):
         """停止定期检查"""

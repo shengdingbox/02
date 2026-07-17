@@ -26,21 +26,10 @@ def _is_gui_mode():
 
 
 def _setup_logging():
-    """配置日志 - pythonw 模式写文件，否则输出到控制台"""
+    """配置日志 - 统一输出到控制台"""
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     date_fmt = "%H:%M:%S"
-
-    if _is_gui_mode():
-        log_dir = os.path.join(os.path.expanduser("~"), ".buddy-tool", "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, "app.log")
-        # RotatingFileHandler: 每个 2MB，保留 3 个
-        from logging.handlers import RotatingFileHandler
-        handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=3, encoding="utf-8")
-        handler.setFormatter(logging.Formatter(log_format, date_fmt))
-        logging.basicConfig(handlers=[handler], level=logging.INFO)
-    else:
-        logging.basicConfig(level=logging.INFO, format=log_format, datefmt=date_fmt)
+    logging.basicConfig(level=logging.INFO, format=log_format, datefmt=date_fmt)
 
 
 logger = logging.getLogger(__name__)

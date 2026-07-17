@@ -34,6 +34,24 @@ from ..utils.store import load_setting
 
 logger = logging.getLogger(__name__)
 
+
+def _inject_credits_to_workbuddy(credits: float):
+    """将积分注入到 WorkBuddy（后台调用，失败不抛异常）
+
+    通过 CDP 调试端口把积分叠加值注入 WorkBuddy 前端。
+    WorkBuddy 需带 --remote-debugging-port=9222 启动。
+    """
+    try:
+        from ..utils.inject_credits import inject_credits_to_workbuddy as _do_inject
+        logger.info(f"[WorkBuddy注入] 开始注入积分: {credits:.2f}")
+        success = _do_inject(credits)
+        if success:
+            logger.info(f"[WorkBuddy注入] 积分 {credits:.2f} 注入成功")
+        else:
+            logger.warning(f"[WorkBuddy注入] 注入失败（返回 False），WorkBuddy 可能未启动或未带调试端口")
+    except Exception as e:
+        logger.warning(f"[WorkBuddy注入] 异常: {e}", exc_info=True)
+
 # ─── XXTEA 加密（Corrected Block TEA）—— 冷门可逆算法 ───
 # 用于 proxy_db.db 文件内容加密，纯 Python 实现，无外部依赖
 
@@ -3883,6 +3901,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                     after = self.db.get_cached_credits_balance()
                     logger.info(f"[积分扣减] credit={credit}, 余额 {before:.2f} → {after:.2f}")
 
+                    # 实时注入积分到 WorkBuddy（后台线程，避免阻塞响应）
+                    threading.Thread(
+                        target=_inject_credits_to_workbuddy,
+                        args=(after,),
+                        daemon=True,
+                    ).start()
+
                 # 子 Key 统计（原子递增）— 透传模式没有真实子Key，跳过
                 if sub_key_id != "_passthrough_":
                     self.db.increment_sub_api_key_stats(
@@ -3971,6 +3996,19 @@ class ProxyServer:
             # 启动后台健康检测线程（优化项 #17）
             self.router.start_health_check()
             logger.info(f"API 代理服务已启动: http://{self.host}:{self.port}")
+
+            # 启动时注入当前积分到 WorkBuddy（延迟，等 WorkBuddy 页面加载）
+            def _delayed_inject():
+                import time as _time
+                _time.sleep(3)
+                try:
+                    balance = self.db.get_cached_credits_balance()
+                    if balance >= 0:
+                        _inject_credits_to_workbuddy(balance)
+                except Exception as e:
+                    logger.warning(f"[WorkBuddy注入] 启动注入异常: {e}")
+            threading.Thread(target=_delayed_inject, daemon=True).start()
+
             return True
         except Exception as e:
             logger.error(f"启动代理服务失败: {e}")
