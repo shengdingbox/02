@@ -7,6 +7,11 @@
 import sys
 import os
 
+# Linux 无 X11 环境（如服务器）下设置 offscreen，避免 Qt xcb 插件加载失败
+# 必须在 PySide6 被导入之前设置
+if sys.platform.startswith('linux'):
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
 # 将项目根目录加入 sys.path，使 `from src.xxx` 正常工作
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:

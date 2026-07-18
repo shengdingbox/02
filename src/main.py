@@ -102,11 +102,12 @@ def main():
     """应用入口"""
     _setup_logging()
 
+    # Linux 无 X11 环境下设置 offscreen，避免 Qt xcb 插件加载失败
+    if sys.platform.startswith('linux'):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
     # CLI 模式：第一个参数是 cli 子命令时，走命令行不启动 GUI
     if len(sys.argv) >= 2 and sys.argv[1] in ("info", "credits", "redeem", "start", "config", "help", "--help", "-h"):
-        # Linux 下避免 Qt xcb 插件加载失败（无 X11 环境）
-        if sys.platform.startswith('linux'):
-            os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
         # 打包后 --windows-console-mode=disable 模式下，需要动态分配控制台
         if sys.platform == 'win32' and not sys.stdin.isatty():
