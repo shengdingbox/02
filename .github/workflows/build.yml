@@ -15,9 +15,25 @@ on:
         required: true
         type: boolean
         default: false
+      build_windows:
+        description: '构建 Windows'
+        required: true
+        type: boolean
+        default: true
+      build_macos:
+        description: '构建 macOS'
+        required: true
+        type: boolean
+        default: true
+      build_linux:
+        description: '构建 Linux CLI'
+        required: true
+        type: boolean
+        default: true
 
 jobs:
   build-windows:
+    if: ${{ github.event_name == 'push' || inputs.build_windows }}
     runs-on: windows-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,6 +69,7 @@ jobs:
             dist/BuddyTool.exe
 
   build-macos-intel:
+    if: ${{ github.event_name == 'push' || inputs.build_macos }}
     runs-on: macos-14
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -99,6 +116,7 @@ jobs:
             dist/BuddyTool
 
   build-macos-arm:
+    if: ${{ github.event_name == 'push' || inputs.build_macos }}
     runs-on: macos-14
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -144,6 +162,7 @@ jobs:
             dist/BuddyTool
 
   build-linux-cli:
+    if: ${{ github.event_name == 'push' || inputs.build_linux }}
     runs-on: ubuntu-22.04
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -196,7 +215,7 @@ jobs:
 
   release:
     # Tag push alone never publishes. Manual dispatch must explicitly set publish=true.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.publish == true }}
     needs: [build-windows, build-macos-intel, build-macos-arm, build-linux-cli]
     runs-on: ubuntu-latest
     permissions:
