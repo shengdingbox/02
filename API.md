@@ -1,7 +1,7 @@
 # Buddy Server API 接口文档
 
 > Base URL: `http://47.83.145.136:8787`
-> 版本: v1.0.0
+> 版本: v1.1.0
 
 ---
 
@@ -155,6 +155,8 @@ print(result)
 
 ```javascript
 // 使用 Web Crypto API (浏览器原生)
+// 注意: Web Crypto 的 AES-GCM 输出为 ciphertext+tag 拼接（tag 在末尾），
+// 与服务端格式 nonce(12) + tag(16) + ciphertext 不同，需要手动重排字节。
 async function encryptBody(data) {
   const keyHex = "38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0";
   const keyBytes = new Uint8Array(keyHex.match(/.{2}/g).map(b => parseInt(b, 16)));
@@ -162,16 +164,18 @@ async function encryptBody(data) {
 
   const plaintext = new TextEncoder().encode(JSON.stringify(data));
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: nonce, tagLength: 128 },
-    key,
-    plaintext
+  // Web Crypto 把 tag(16) 附在 ciphertext 末尾
+  const ctWithTag = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, tagLength: 128 }, key, plaintext)
   );
+  const ciphertext = ctWithTag.subarray(0, ctWithTag.length - 16);
+  const tag = ctWithTag.subarray(ctWithTag.length - 16);
 
-  // nonce(12) + ciphertext+tag(16)
-  const raw = new Uint8Array(12 + ciphertext.byteLength);
+  // 服务端格式: nonce(12) + tag(16) + ciphertext
+  const raw = new Uint8Array(12 + 16 + ciphertext.length);
   raw.set(nonce, 0);
-  raw.set(new Uint8Array(ciphertext), 12);
+  raw.set(tag, 12);
+  raw.set(ciphertext, 28);
   const dataB64 = btoa(String.fromCharCode(...raw));
   return JSON.stringify({ data: dataB64 });
 }
@@ -182,9 +186,14 @@ async function decryptBody(bodyText) {
   const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
 
   const bodyJson = JSON.parse(bodyText);
-  const raw = Uint8Array.from(atob(bodyJson.data), c => c.charCodeAt(255));
+  const raw = Uint8Array.from(atob(bodyJson.data), c => c.charCodeAt(0));
   const nonce = raw.slice(0, 12);
-  const ctWithTag = raw.slice(12);
+  const tag = raw.slice(12, 28);
+  const ciphertext = raw.slice(28);
+  // Web Crypto 需要 ciphertext+tag 拼接
+  const ctWithTag = new Uint8Array(ciphertext.length + tag.length);
+  ctWithTag.set(ciphertext, 0);
+  ctWithTag.set(tag, ciphertext.length);
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: nonce, tagLength: 128 },
     key,
@@ -198,13 +207,15 @@ async function decryptBody(bodyText) {
 
 ## 公开接口（无需鉴权）
 
+> 以下接口均需携带签名请求头并加密请求体，响应也加密返回。
+
 ### 1. 卡密兑换
 
 ```
 POST /api/redeem
 ```
 
-**请求体**（支持加密）:
+**请求体**（加密）:
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -212,10 +223,11 @@ POST /api/redeem
 | userKey | string | 是 | 机器码 (bc_ 前缀) |
 | operator | string | 否 | 操作者标识 |
 
-**加密请求示例**:
-```json
-{"data": "加密后的base64字符串"}
-```
+**处理流程**:
+1. 校验签名 + 解密请求体
+2. 机器码不存在时自动创建（余额 0）
+3. 调用 `store.redeem` 扣减卡密余额、增加机器码余额
+4. 写入 `buddy_redeem_records` 兑换记录
 
 **成功响应**（加密，解密后）:
 ```json
@@ -242,17 +254,17 @@ POST /api/redeem
 POST /api/buddykey/get
 ```
 
-**请求体**（支持加密）:
+**请求体**（加密）:
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | userKey | string | 是 | 机器码 (bc_ 前缀) |
 
 **处理流程**:
-1. 查机器码余额 → ≤0 返回"余额不足"
-2. 查 `buddy_keys` 表中余额 > 100 的可用记录
+1. 查机器码余额 → 不存在返回 404，≤0 返回"余额不足"
+2. 查 `buddy_buddy_keys` 表中余额 > 100 的可用记录
 3. 有则直接分配返回
-4. 无则调 DataPulse 上游获取 → 存表 → 分配 → 解密 → 返回
+4. 无则调 DataPulse 上游获取 → 解密 `encrypted_key` → 存表（去重）→ 分配 → 返回
 
 **成功响应**（加密，解密后）:
 ```json
@@ -266,7 +278,7 @@ POST /api/buddykey/get
 }
 ```
 
-**余额不足**:
+**余额不足**（加密，解密后）:
 ```json
 {
   "success": false,
@@ -284,7 +296,7 @@ POST /api/buddykey/get
 POST /api/usage/report
 ```
 
-**请求体**（支持加密）:
+**请求体**（加密）:
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -295,6 +307,10 @@ POST /api/usage/report
 | request_tokens | integer | 否 | 请求token数 |
 | response_tokens | integer | 否 | 响应token数 |
 | upstream_id | string | 否 | 上游ID（获取的key） |
+
+**处理流程**:
+1. 校验签名 + 解密请求体
+2. 扣减机器码余额，写入 `buddy_usage_reports`
 
 **成功响应**（加密，解密后）:
 ```json
@@ -321,6 +337,8 @@ POST /api/user/credits
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | userKey | string | 是 | 机器码 |
+
+**说明**: 机器码不存在或查询异常时，返回全 0 而非报错。
 
 **响应**（加密，解密后）:
 ```json
@@ -352,8 +370,12 @@ GET /api/user/today-usage?userKey=bc_xxx
       "amount": 1.5,
       "balanceAfter": 998.5,
       "model": "gpt-4",
+      "nodeId": null,
+      "phone": null,
       "tokens": 1500,
-      "note": "redeem from BC_xxx",
+      "note": null,
+      "userNote": null,
+      "clientIp": null,
       "createdAt": "2026-07-14T10:00:00+00:00"
     }
   ]
@@ -414,6 +436,33 @@ POST /api/version/check
 
 ---
 
+### 8. 获取可用模型列表
+
+```
+POST /api/models/list
+```
+
+**请求体**（必须加密）: 无必填字段，传空对象 `{}` 即可，仅用于校验加密签名。
+
+**响应**（加密，解密后）:
+```json
+{
+  "models": [
+    {
+      "id": "gpt-4",
+      "name": "GPT-4",
+      "maxInputTokens": 128000,
+      "maxOutputTokens": 8192,
+      "supportsToolCall": true,
+      "supportsImages": true,
+      "supportsReasoning": false
+    }
+  ]
+}
+```
+
+---
+
 ## 管理接口（需鉴权）
 
 > 所有管理接口需携带请求头: `Authorization: Bearer <ADMIN_API_KEY>`
@@ -424,7 +473,7 @@ POST /api/version/check
 | # | 方法 | 路径 | 说明 |
 |---|------|------|------|
 | 1 | POST | `/api/admin/cards` | 创建卡密（body: `{"initialCredits": 1000}`） |
-| 2 | POST | `/api/admin/cards/batch` | 批量创建卡密（body: `{"count": 5, "initialCredits": 1000}`） |
+| 2 | POST | `/api/admin/cards/batch` | 批量创建卡密（body: `{"count": 5, "initialCredits": 1000}`，返回 `{"keys": [...], "count": 5}`） |
 | 3 | GET | `/api/admin/cards?limit=20&offset=0` | 卡密列表 |
 | 4 | GET | `/api/admin/cards/:key` | 卡密详情 |
 | 5 | POST | `/api/admin/cards/:key/recharge` | 卡密充值（body: `{"credits": 100}`） |
@@ -442,7 +491,7 @@ POST /api/version/check
 |---|------|------|------|
 | 8 | GET | `/api/admin/machines?limit=20&offset=0&search=` | 机器码列表（含兑换汇总） |
 | 9 | GET | `/api/admin/machines/:key` | 机器码详情（含最近10条兑换） |
-| 10 | POST | `/api/admin/machines/:key/recharge` | 机器码充值（body: `{"credits": 100}`） |
+| 10 | POST | `/api/admin/machines/:key/recharge` | 机器码充值（body: `{"credits": 100}`，不存在则自动创建） |
 
 ### BuddyKey 管理
 
@@ -471,19 +520,43 @@ POST /api/version/check
 | 21 | POST | `/api/admin/versions/:id` | 编辑版本 |
 | 22 | DELETE | `/api/admin/versions/:id` | 删除版本 |
 
+### 模型管理
+
+| # | 方法 | 路径 | 说明 |
+|---|------|------|------|
+| 23 | GET | `/api/admin/models?limit=50&offset=0&search=` | 模型列表 |
+| 24 | POST | `/api/admin/models` | 创建模型 |
+| 25 | POST | `/api/admin/models/:dbId` | 编辑模型 |
+| 26 | DELETE | `/api/admin/models/:dbId` | 删除模型 |
+
+**创建/编辑模型 body 字段**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| model_id (或 id) | string | 模型ID，如 `gpt-4` |
+| name | string | 模型名称 |
+| max_input_tokens (或 maxInputTokens) | integer | 最大输入token，默认 128000 |
+| max_output_tokens (或 maxOutputTokens) | integer | 最大输出token，默认 8192 |
+| supports_tool_call (或 supportsToolCall) | bool | 是否支持工具调用 |
+| supports_images (或 supportsImages) | bool | 是否支持图片 |
+| supports_reasoning (或 supportsReasoning) | bool | 是否支持推理 |
+| sort_order | integer | 排序权重，默认 0 |
+| is_active | bool | 是否启用，默认 true |
+
 ---
 
 ## 静态页面
 
 | 路径 | 页面 | 说明 |
 |------|------|------|
+| `/xiaofeibuddy/` | 卡密管理 | 管理后台创建/充值/删除卡密 |
 | `/redeem/` | 卡密兑换 | 用户输入卡密+机器码兑换 |
 | `/records/` | 兑换记录 | 管理后台查看兑换流水 |
 | `/usagereports/` | 使用记录 | 管理后台查看使用上报 |
 | `/machines/` | 机器码管理 | 管理后台管理机器码额度 |
 | `/buddykeys/` | BuddyKey管理 | 管理后台管理激活码 |
 | `/versions/` | 版本管理 | 管理后台管理版本发布 |
-| `/xiaofeibuddy/` | 卡密管理 | 管理后台创建/充值/删除卡密 |
+| `/models/` | 模型管理 | 管理后台管理可用模型 |
 
 ---
 
@@ -504,5 +577,5 @@ Access-Control-Allow-Headers: Authorization, Content-Type, x-api-key
 
 ### 加密兼容性
 
-- **加密接口**: `/api/redeem`、`/api/buddykey/get`、`/api/usage/report`、`/api/user/credits`、`/api/version/check` — 请求必须加密，响应加密返回
+- **加密接口**: `/api/redeem`、`/api/buddykey/get`、`/api/usage/report`、`/api/user/credits`、`/api/version/check`、`/api/models/list` — 请求必须加密并携带签名头，响应加密返回
 - **明文接口**: `GET /api/user/today-usage`、`POST /api/activate`、所有管理接口使用明文 JSON

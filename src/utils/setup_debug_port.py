@@ -603,20 +603,22 @@ def setup_and_restart(port=PORT):
     # 2. 关闭正在运行的 WorkBuddy（通过进程名找 PID + TerminateProcess）
     _close_workbuddy()
 
-    # 3. 直接用 exe 带参数启动
+    # 3. 通过快捷方式启动 WorkBuddy（避免弹出命令窗口）
     try:
-        exe = find_exe()
-        if exe:
-            subprocess.Popen(
-                [exe, target_arg],
-            )
-            time.sleep(3)
-            return True, "WorkBuddy 已配置调试端口并重启"
-        elif shortcuts:
+        if shortcuts:
             os.startfile(shortcuts[0])
             time.sleep(3)
             return True, "WorkBuddy 已配置调试端口并重启"
         else:
+            exe = find_exe()
+            if exe:
+                # 用 ShellExecute 而非 subprocess，避免命令窗口
+                import ctypes
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "open", exe, target_arg, os.path.dirname(exe), 1
+                )
+                time.sleep(3)
+                return True, "WorkBuddy 已配置调试端口并重启"
             return False, "找不到 WorkBuddy.exe"
     except Exception as e:
         return False, f"启动 WorkBuddy 失败: {e}"

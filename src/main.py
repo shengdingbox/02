@@ -102,6 +102,11 @@ def main():
     """应用入口"""
     _setup_logging()
 
+    # CLI 模式：第一个参数是 cli 子命令时，走命令行不启动 GUI
+    if len(sys.argv) >= 2 and sys.argv[1] in ("info", "credits", "redeem", "start", "config", "help", "--help", "-h"):
+        from .cli import main as cli_main
+        sys.exit(cli_main())
+
     # 注册 atexit 清理（即使异常退出也尝试清理）
     atexit.register(_force_cleanup)
 

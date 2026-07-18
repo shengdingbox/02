@@ -276,6 +276,34 @@ def check_version(current_version: str = "", platform: str = "win") -> dict:
         return {"error": str(e)}
 
 
+def get_models_list() -> dict:
+    """获取可用模型列表（POST 加密接口）
+
+    Returns:
+        {"models": [{"id": ..., "name": ..., "maxInputTokens": ..., ...}]}
+        失败时返回 {"error": "..."}
+    """
+    url = f"{SERVER_BASE}/models/list"
+    payload = {}
+
+    try:
+        encrypted_body = _encrypt_body(payload)
+        resp = requests.post(
+            url,
+            data=encrypted_body,
+            headers=_build_signed_headers(),
+            timeout=15,
+            proxies=_NO_PROXY,
+        )
+        if resp.ok:
+            return _decrypt_body(resp.text)
+        else:
+            return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+    except Exception as e:
+        logger.error(f"获取模型列表失败: {e}")
+        return {"error": str(e)}
+
+
 def report_usage(
     device_fingerprint: str,
     credits_used: float,
