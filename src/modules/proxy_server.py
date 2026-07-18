@@ -169,7 +169,7 @@ SUPPORTED_MODELS = [
     # MiniMax
     "minimax-m3", "minimax-m2.7", "minimax-m2.5",
     # Kimi
-    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7",
+    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7","kimi-k3"
     # 混元
     "hy3", "hy3-preview", "hunyuan-chat", "hunyuan-2.0-thinking",
 ]
@@ -205,6 +205,7 @@ MODEL_CONTEXT_LENGTHS = {
     "kimi-k2.6": 256000,               # 256K
     "kimi-k2.5": 1000000,              # 百万级上下文
     "kimi-k2.7": 256000,               # 256K
+    "kimi-k3": 1000000,               # 256K
     # 混元
     "hy3": 256000,                     # 256K
     "hy3-preview": 256000,             # 256K
@@ -224,6 +225,7 @@ MODEL_SUPPORTS_IMAGES = {
     "glm-4.6": True,
     # 新增模型
     "kimi-k2.7": True,
+    "kimi-k3": True,
     "hy3": True,
 }
 
@@ -238,6 +240,7 @@ MODEL_MAX_OUTPUT_TOKENS = {
     "glm-4.6": 131072,
     # 新增模型
     "kimi-k2.7": 131072,
+    "kimi-k3": 131072,
     "hy3": 131072,
 }
 
