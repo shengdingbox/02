@@ -105,7 +105,8 @@ def find_exe():
 
 
 def get_shortcut_info(lnk_path):
-    """读取快捷方式的 TargetPath 和 Arguments（纯 Python，不调 PowerShell）"""
+    """读取快捷方式的 TargetPath 和 Arguments（pywin32 优先，失败 fallback PowerShell）"""
+    # 方案1: pywin32
     try:
         import pythoncom
         from win32com.shell import shell, shellcon
@@ -121,25 +122,31 @@ def get_shortcut_info(lnk_path):
             return target, args
         finally:
             pythoncom.CoUninitialize()
-    except ImportError:
+    except Exception:
         pass
-    # fallback: PowerShell
-    ps = (
-        "$ws=New-Object -ComObject WScript.Shell;"
-        "$s=$ws.CreateShortcut('" + lnk_path + "');"
-        "Write-Output $s.TargetPath;"
-        "Write-Output '---';"
-        "Write-Output $s.Arguments"
-    )
-    r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10)
-    parts = r.stdout.split('---\n')
-    if len(parts) >= 2:
-        return parts[0].strip(), parts[1].strip()
+
+    # 方案2: PowerShell
+    try:
+        ps = (
+            "$ws=New-Object -ComObject WScript.Shell;"
+            "$s=$ws.CreateShortcut('" + lnk_path + "');"
+            "Write-Output $s.TargetPath;"
+            "Write-Output '---';"
+            "Write-Output $s.Arguments"
+        )
+        r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10,
+                           creationflags=0x08000000)
+        parts = r.stdout.split('---\n')
+        if len(parts) >= 2:
+            return parts[0].strip(), parts[1].strip()
+    except Exception:
+        pass
     return '', ''
 
 
 def set_shortcut_args(lnk_path, args):
-    """设置快捷方式的 Arguments（纯 Python，不调 PowerShell）"""
+    """设置快捷方式的 Arguments（pywin32 优先，失败 fallback PowerShell）"""
+    # 方案1: pywin32
     try:
         import pythoncom
         from win32com.shell import shellcon
@@ -154,17 +161,22 @@ def set_shortcut_args(lnk_path, args):
             return True
         finally:
             pythoncom.CoUninitialize()
-    except ImportError:
+    except Exception:
         pass
-    # fallback: PowerShell
-    ps = (
-        "$ws=New-Object -ComObject WScript.Shell;"
-        "$s=$ws.CreateShortcut('" + lnk_path + "');"
-        "$s.Arguments='" + args + "';"
-        "$s.Save()"
-    )
-    r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10)
-    return r.returncode == 0
+
+    # 方案2: PowerShell
+    try:
+        ps = (
+            "$ws=New-Object -ComObject WScript.Shell;"
+            "$s=$ws.CreateShortcut('" + lnk_path + "');"
+            "$s.Arguments='" + args + "';"
+            "$s.Save()"
+        )
+        r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10,
+                           creationflags=0x08000000)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def do_install(port):
@@ -181,38 +193,13 @@ def do_install(port):
         if not exe:
             print("[ERR] 找不到 WorkBuddy.exe，请确认安装路径")
             sys.exit(1)
-        # 创建桌面快捷方式（优先用 Python COM）
+        # 创建桌面快捷方式
         desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', 'WorkBuddy.lnk')
-        try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            try:
-                uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-                persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-                ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-                ishell.SetPath(exe)
-                ishell.SetWorkingDirectory(os.path.dirname(exe))
-                ishell.SetArguments(target_arg)
-                persist_file.Save(desktop, 0)
-                print("[OK] 已创建桌面快捷方式: " + desktop)
-            finally:
-                pythoncom.CoUninitialize()
-        except ImportError:
-            # fallback: PowerShell
-            ps = (
-                "$ws=New-Object -ComObject WScript.Shell;"
-                "$s=$ws.CreateShortcut('" + desktop + "');"
-                "$s.TargetPath='" + exe + "';"
-                "$s.WorkingDirectory='" + os.path.dirname(exe) + "';"
-                "$s.Arguments='" + target_arg + "';"
-                "$s.Save()"
-            )
-            r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                print("[OK] 已创建桌面快捷方式: " + desktop)
-            else:
-                print("[ERR] 创建快捷方式失败: " + r.stderr)
-                sys.exit(1)
+        if _create_shortcut(desktop, exe, target_arg):
+            print("[OK] 已创建桌面快捷方式: " + desktop)
+        else:
+            print("[ERR] 创建快捷方式失败")
+            sys.exit(1)
     else:
         for lnk in shortcuts:
             target, args = get_shortcut_info(lnk)
@@ -309,86 +296,95 @@ def do_check():
 def setup_and_restart(port=PORT):
     """安装调试端口配置并重启 WorkBuddy
 
-    使用 Python COM 接口操作快捷方式（不调 PowerShell），用 ctypes 优雅关闭进程（不用 taskkill）。
-    仅支持 Windows，macOS 直接返回。
+    流程:
+        1. 尝试修改快捷方式（pywin32 优先，失败 fallback PowerShell，再失败跳过）
+        2. 优雅关闭 WorkBuddy（ctypes 发 WM_CLOSE）
+        3. 直接用 exe + 调试端口参数启动（不依赖快捷方式）
 
     Returns:
         tuple: (success: bool, message: str)
     """
     import time
 
-    # macOS / Linux 不支持（WorkBuddy 调试端口配置仅限 Windows）
+    # macOS / Linux 不支持
     if sys.platform != 'win32':
         return False, "此功能仅支持 Windows"
 
     target_arg = ARG_PREFIX + str(port)
 
-    # 1. 安装调试端口到快捷方式（纯 Python COM）
-    shortcuts = find_shortcuts()
-    if not shortcuts:
-        exe = find_exe()
-        if not exe:
-            return False, "找不到 WorkBuddy.exe，请确认已安装"
-        # 创建桌面快捷方式（Python COM）
-        desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', 'WorkBuddy.lnk')
-        try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            try:
-                uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-                persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-                ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-                ishell.SetPath(exe)
-                ishell.SetWorkingDirectory(os.path.dirname(exe))
-                ishell.SetArguments(target_arg)
-                persist_file.Save(desktop, 0)
-                shortcuts = [desktop]
-            finally:
-                pythoncom.CoUninitialize()
-        except ImportError:
-            # 无 pywin32 fallback PowerShell
-            ps = (
-                "$ws=New-Object -ComObject WScript.Shell;"
-                "$s=$ws.CreateShortcut('" + desktop + "');"
-                "$s.TargetPath='" + exe + "';"
-                "$s.WorkingDirectory='" + os.path.dirname(exe) + "';"
-                "$s.Arguments='" + target_arg + "';"
-                "$s.Save()"
-            )
-            r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10,
-                               creationflags=0x08000000)
-            if r.returncode != 0:
-                return False, "创建快捷方式失败: " + r.stderr.strip()
-            shortcuts = [desktop]
-    else:
-        for lnk in shortcuts:
-            target, args = get_shortcut_info(lnk)
-            if target_arg in args:
-                continue
-            other_args = [a for a in args.split() if not a.startswith(ARG_PREFIX)]
-            new_args = ' '.join(other_args + [target_arg])
-            set_shortcut_args(lnk, new_args)
+    # 1. 找到 exe 路径
+    exe = find_exe()
+    if not exe:
+        return False, "找不到 WorkBuddy.exe，请确认已安装"
 
-    # 2. 优雅关闭正在运行的 WorkBuddy（用 ctypes 发 WM_CLOSE，不用 taskkill）
+    # 2. 尝试修改快捷方式（可选，失败不影响启动）
+    try:
+        shortcuts = find_shortcuts()
+        if shortcuts:
+            for lnk in shortcuts:
+                target, args = get_shortcut_info(lnk)
+                if target_arg in (args or ""):
+                    continue
+                other_args = [a for a in (args or "").split() if not a.startswith(ARG_PREFIX)]
+                new_args = ' '.join(other_args + [target_arg])
+                set_shortcut_args(lnk, new_args)
+        else:
+            # 没有快捷方式，创建一个（可选，失败跳过）
+            desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', 'WorkBuddy.lnk')
+            _create_shortcut(desktop, exe, target_arg)
+    except Exception:
+        pass  # 快捷方式修改失败不影响直接启动
+
+    # 3. 优雅关闭正在运行的 WorkBuddy
     _close_workbuddy_gracefully()
 
-    # 3. 直接用 exe 带参数启动（不通过快捷方式，减少特征）
+    # 4. 直接用 exe + 调试端口参数启动
     try:
-        exe = find_exe()
-        if exe:
-            subprocess.Popen(
-                [exe, target_arg],
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            )
-            time.sleep(3)
-            return True, "WorkBuddy 已配置调试端口并重启"
-        else:
-            # fallback: 通过快捷方式启动
-            os.startfile(shortcuts[0])
-            time.sleep(3)
-            return True, "WorkBuddy 已配置调试端口并重启"
+        subprocess.Popen(
+            [exe, target_arg],
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        time.sleep(3)
+        return True, "WorkBuddy 已配置调试端口并重启"
     except Exception as e:
         return False, f"启动 WorkBuddy 失败: {e}"
+
+
+def _create_shortcut(lnk_path, exe_path, args):
+    """创建快捷方式（优先 pywin32，失败 fallback PowerShell）"""
+    # 方案1: pywin32
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
+            persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
+            ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
+            ishell.SetPath(exe_path)
+            ishell.SetWorkingDirectory(os.path.dirname(exe_path))
+            ishell.SetArguments(args)
+            persist_file.Save(lnk_path, 0)
+            return True
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception:
+        pass
+
+    # 方案2: PowerShell
+    try:
+        ps = (
+            "$ws=New-Object -ComObject WScript.Shell;"
+            "$s=$ws.CreateShortcut('" + lnk_path + "');"
+            "$s.TargetPath='" + exe_path + "';"
+            "$s.WorkingDirectory='" + os.path.dirname(exe_path) + "';"
+            "$s.Arguments='" + args + "';"
+            "$s.Save()"
+        )
+        r = subprocess.run(['powershell', '-NoProfile', '-Command', ps], capture_output=True, text=True, timeout=10,
+                           creationflags=0x08000000)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def _close_workbuddy_gracefully(timeout=5):
