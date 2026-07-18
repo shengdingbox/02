@@ -31,9 +31,6 @@ venv\Scripts\python.exe -m nuitka ^
     --onefile ^
     --windows-console-mode=disable ^
     --enable-plugin=pyside6 ^
-    --include-package=win32com ^
-    --include-package=pythoncom ^
-    --include-package=pywintypes ^
     --include-data-dir=assets=assets ^
     --include-data-dir=src\i18n=src\i18n ^
     --include-data-file=src\VERSION=src\VERSION ^
