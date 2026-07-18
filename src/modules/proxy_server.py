@@ -1274,23 +1274,36 @@ class ProxyDatabase:
         # 最多重试 3 次，应对并发写入导致的短暂读取失败
         for attempt in range(3):
             try:
-                # 以二进制模式读取，避免 UTF-8 解码失败（加密内容是纯 ASCII base64，但可能混入非法字节）
+                # 以二进制模式读取，避免 UTF-8 解码失败
                 with open(self._db_path, "rb") as f:
                     raw_bytes = f.read()
                 if not raw_bytes.strip():
                     import time
                     time.sleep(0.2 * (attempt + 1))
                     continue
-                # 尝试以 UTF-8 解码（正常情况）
+                # 尝试以 UTF-8 解码（正常情况，加密内容是纯 ASCII base64）
                 try:
                     content = raw_bytes.decode("utf-8")
                 except UnicodeDecodeError:
-                    # UTF-8 解码失败，尝试 latin-1（逐字节映射，不会失败）
-                    content = raw_bytes.decode("latin-1")
+                    # UTF-8 解码失败，说明文件不是有效的加密数据
+                    # 可能是旧版本写入的二进制格式或文件损坏
+                    # 直接删除损坏的文件，返回空数据
+                    logger.warning(f"[DB] proxy_db.db 编码异常，文件可能损坏，已重置（尝试 {attempt+1}/3）")
+                    try:
+                        os.remove(self._db_path)
+                    except Exception:
+                        pass
+                    return {
+                        "upstream_keys": [],
+                        "sub_api_keys": [],
+                        "request_logs": [],
+                        "daily_stats": {},
+                        "settings": {"upstream_proxy": ""},
+                    }
                 # 解密并反序列化（兼容旧版明文 JSON）
                 return _decrypt_json(content)
-            except (json.JSONDecodeError, ValueError) as e:
-                # JSON 解析失败（可能读到半截文件），等一下重试
+            except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
+                # JSON 解析失败或解密失败（可能读到半截文件），等一下重试
                 logger.warning(f"[DB] proxy_db.db 读取失败(尝试 {attempt+1}/3): {e}")
                 import time
                 time.sleep(0.3 * (attempt + 1))
@@ -1298,8 +1311,12 @@ class ProxyDatabase:
                 logger.error(f"[DB] proxy_db.db 读取异常: {e}")
                 import time
                 time.sleep(0.3 * (attempt + 1))
-        # 重试 3 次都失败，说明文件确实损坏
-        logger.error("[DB] proxy_db.db 读取失败3次，返回空数据（可能需要恢复备份）")
+        # 重试 3 次都失败，说明文件确实损坏，删除后返回空数据
+        logger.warning("[DB] proxy_db.db 读取失败3次，已重置数据文件")
+        try:
+            os.remove(self._db_path)
+        except Exception:
+            pass
         return {
             "upstream_keys": [],
             "sub_api_keys": [],
