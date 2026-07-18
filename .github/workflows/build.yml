@@ -43,7 +43,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=pyside6 --include-package=win32com --include-package=win32com.shell --include-package=pythoncom --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

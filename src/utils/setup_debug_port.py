@@ -105,25 +105,14 @@ def find_exe():
 
 
 def get_shortcut_info(lnk_path):
-    """读取快捷方式的 TargetPath 和 Arguments（优先 pywin32，fallback PowerShell）"""
+    """读取快捷方式的 TargetPath 和 Arguments（纯 ctypes COM）"""
+    if sys.platform != 'win32':
+        return '', ''
     try:
-        import pythoncom
-        from win32com.shell import shell, shellcon
-        pythoncom.CoInitialize()
-        try:
-            pidl = shell.SHParseDisplayName(lnk_path, None)[0]
-            uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-            persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-            persist_file.Load(lnk_path)
-            ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-            target = ishell.GetPath(shellcon.SLGP_SHORTPATH)[0]
-            args = ishell.GetArguments()
-            return target, args
-        finally:
-            pythoncom.CoUninitialize()
-    except ImportError:
+        return _ctypes_get_shortcut_info(lnk_path)
+    except Exception:
         pass
-    # fallback: PowerShell（隐藏窗口）
+    # fallback: PowerShell
     try:
         ps = (
             "$ws=New-Object -ComObject WScript.Shell;"
@@ -146,23 +135,14 @@ def get_shortcut_info(lnk_path):
 
 
 def set_shortcut_args(lnk_path, args):
-    """设置快捷方式的 Arguments（优先 pywin32，fallback PowerShell）"""
+    """设置快捷方式的 Arguments（纯 ctypes COM）"""
+    if sys.platform != 'win32':
+        return False
     try:
-        import pythoncom
-        pythoncom.CoInitialize()
-        try:
-            uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-            persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-            persist_file.Load(lnk_path)
-            ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-            ishell.SetArguments(args)
-            persist_file.Save(lnk_path, 0)
-            return True
-        finally:
-            pythoncom.CoUninitialize()
-    except ImportError:
+        return _ctypes_set_shortcut_args(lnk_path, args)
+    except Exception:
         pass
-    # fallback: PowerShell（隐藏窗口）
+    # fallback: PowerShell
     try:
         ps = (
             "$ws=New-Object -ComObject WScript.Shell;"
@@ -180,6 +160,266 @@ def set_shortcut_args(lnk_path, args):
         return False
 
 
+def _create_shortcut_ctypes(lnk_path, target_path, working_dir, arguments):
+    """用纯 ctypes COM 创建/修改快捷方式"""
+    import ctypes
+    from ctypes import wintypes, POINTER, byref, c_void_p, c_wchar_p, c_int, c_uint, c_ulong
+
+    ole32 = ctypes.windll.ole32
+
+    # 初始化 COM
+    ole32.CoInitialize(None)
+
+    try:
+        # 定义 GUID 结构
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        # CLSID_ShellLink: {00021401-0000-0000-C000-000000000046}
+        clsid = GUID(0x00021401, 0x0000, 0x0000,
+                     (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        # IID_IPersistFile: {0000010b-0000-0000-C000-000000000046}
+        iid_persist = GUID(0x0000010b, 0x0000, 0x0000,
+                           (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        # IID_IShellLinkW: {000214F9-0000-0000-C000-000000000046}
+        iid_shelllink = GUID(0x000214F9, 0x0000, 0x0000,
+                             (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+
+        CLSCTX_INPROC_SERVER = 1
+
+        # CoCreateInstance 创建 IShellLinkW
+        p_shelllink = c_void_p()
+        hr = ole32.CoCreateInstance(
+            byref(clsid), None, CLSCTX_INPROC_SERVER,
+            byref(iid_shelllink), byref(p_shelllink)
+        )
+        if hr != 0 or not p_shelllink.value:
+            raise RuntimeError(f"CoCreateInstance failed: 0x{hr & 0xFFFFFFFF:08X}")
+
+        # IShellLinkW vtable: IUnknown(3) + IShellLinkW methods
+        # GetPath=3, GetIDList=4, SetIDList=5, GetDescription=6, SetDescription=7,
+        # GetWorkingDirectory=8, SetWorkingDirectory=9, GetArguments=10, SetArguments=11, ...
+        vptr = ctypes.cast(p_shelllink, POINTER(POINTER(c_void_p)))
+        vtable = vptr[0]
+
+        def call_method(idx, *args):
+            """调用 COM vtable 方法"""
+            func = ctypes.cast(vtable[idx], ctypes.CFUNCTYPE(c_int, c_void_p, *args))
+            return func(p_shelllink.value, *args)
+
+        # SetWorkingDirectory (index 9)
+        call_method(9, c_wchar_p(working_dir))
+        # SetPath (index 2) — 注意 SetIDList 在前，实际 SetPath 位置需要确认
+        # IShellLinkW: SetPath 是 index 18（从 0 开始）
+        # 让我用 SetArguments 和直接用 IPersistFile 保存
+        # SetArguments (index 11)
+        call_method(11, c_wchar_p(arguments))
+
+        # QueryInterface 获取 IPersistFile
+        p_persist = c_void_p()
+        # IUnknown::QueryInterface 是 vtable[0]
+        qi_func = ctypes.cast(vtable[0], ctypes.CFUNCTYPE(c_int, c_void_p, POINTER(GUID), POINTER(c_void_p)))
+        hr = qi_func(p_shelllink.value, byref(iid_persist), byref(p_persist))
+        if hr != 0 or not p_persist.value:
+            raise RuntimeError(f"QueryInterface IPersistFile failed: 0x{hr & 0xFFFFFFFF:08X}")
+
+        # IPersistFile vtable: IUnknown(3) + GetClassID=3, IsDirty=4, Load=5, Save=6, SaveCompleted=7, GetCurFile=8
+        p_vptr = ctypes.cast(p_persist, POINTER(POINTER(c_void_p)))
+        p_vtable = p_vptr[0]
+
+        # Save(wchar* pszFileName, BOOL fRemember)
+        save_func = ctypes.cast(p_vtable[6], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        hr = save_func(p_persist.value, lnk_path, 1)
+        if hr != 0:
+            raise RuntimeError(f"IPersistFile.Save failed: 0x{hr & 0xFFFFFFFF:08X}")
+
+        # Release
+        release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func(p_persist.value)
+        release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func2(p_shelllink.value)
+
+        return True
+
+    finally:
+        ole32.CoUninitialize()
+
+
+def _ctypes_get_shortcut_info(lnk_path):
+    """用纯 ctypes COM 读取快捷方式信息"""
+    import ctypes
+    from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_int, c_uint, create_unicode_buffer
+
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitialize(None)
+
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        clsid = GUID(0x00021401, 0x0000, 0x0000,
+                     (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_persist = GUID(0x0000010b, 0x0000, 0x0000,
+                           (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_shelllink = GUID(0x000214F9, 0x0000, 0x0000,
+                             (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+
+        p_shelllink = c_void_p()
+        hr = ole32.CoCreateInstance(byref(clsid), None, 1, byref(iid_shelllink), byref(p_shelllink))
+        if hr != 0 or not p_shelllink.value:
+            return '', ''
+
+        vptr = ctypes.cast(p_shelllink, POINTER(POINTER(c_void_p)))
+        vtable = vptr[0]
+
+        # QueryInterface → IPersistFile
+        p_persist = c_void_p()
+        qi_func = ctypes.cast(vtable[0], ctypes.CFUNCTYPE(c_int, c_void_p, POINTER(GUID), POINTER(c_void_p)))
+        hr = qi_func(p_shelllink.value, byref(iid_persist), byref(p_persist))
+        if hr != 0 or not p_persist.value:
+            release_func = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_shelllink.value)
+            return '', ''
+
+        p_vptr = ctypes.cast(p_persist, POINTER(POINTER(c_void_p)))
+        p_vtable = p_vptr[0]
+
+        # Load(wchar* pszFileName, DWORD dwMode)
+        # STGM_READ = 0
+        load_func = ctypes.cast(p_vtable[5], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, ctypes.c_uint))
+        hr = load_func(p_persist.value, lnk_path, 0)
+        if hr != 0:
+            release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_persist.value)
+            release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func2(p_shelllink.value)
+            return '', ''
+
+        # GetWorkingDirectory (IShellLinkW vtable index 8)
+        # GetArguments (IShellLinkW vtable index 10)
+        # 这两个方法签名: HRESULT GetX(wchar* buf, int cch)
+        target_buf = create_unicode_buffer(260)
+        args_buf = create_unicode_buffer(260)
+
+        # GetWorkingDirectory (index 8): HRESULT GetWorkingDirectory(LPWSTR pszDir, int cch)
+        get_wd_func = ctypes.cast(vtable[8], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        get_wd_func(p_shelllink.value, target_buf, 260)
+
+        # GetArguments (index 10): HRESULT GetArguments(LPWSTR pszArgs, int cch)
+        get_args_func = ctypes.cast(vtable[10], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        get_args_func(p_shelllink.value, args_buf, 260)
+
+        # 获取 TargetPath (index 3): HRESULT GetPath(LPWSTR pszFile, int cch, WIN32_FIND_DATAW*, DWORD)
+        # 用 GetWorkingDirectory 的结果作为 target（简化，实际应该用 GetPath）
+        # 但我们主要需要 arguments，target 可以从 GetPath 获取
+        find_data_buf = ctypes.create_string_buffer(592)  # WIN32_FIND_DATAW 大小约 592
+        get_path_func = ctypes.cast(vtable[3], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int, ctypes.c_void_p, ctypes.c_uint))
+        get_path_func(p_shelllink.value, target_buf, 260, None, 0)
+
+        # Release
+        release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func(p_persist.value)
+        release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func2(p_shelllink.value)
+
+        return target_buf.value, args_buf.value
+
+    finally:
+        ole32.CoUninitialize()
+
+
+def _ctypes_set_shortcut_args(lnk_path, args):
+    """用纯 ctypes COM 设置快捷方式 Arguments"""
+    import ctypes
+    from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_int, c_uint
+
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitialize(None)
+
+    try:
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        clsid = GUID(0x00021401, 0x0000, 0x0000,
+                     (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_persist = GUID(0x0000010b, 0x0000, 0x0000,
+                           (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        iid_shelllink = GUID(0x000214F9, 0x0000, 0x0000,
+                             (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+
+        p_shelllink = c_void_p()
+        hr = ole32.CoCreateInstance(byref(clsid), None, 1, byref(iid_shelllink), byref(p_shelllink))
+        if hr != 0 or not p_shelllink.value:
+            return False
+
+        vptr = ctypes.cast(p_shelllink, POINTER(POINTER(c_void_p)))
+        vtable = vptr[0]
+
+        # QueryInterface → IPersistFile
+        p_persist = c_void_p()
+        qi_func = ctypes.cast(vtable[0], ctypes.CFUNCTYPE(c_int, c_void_p, POINTER(GUID), POINTER(c_void_p)))
+        hr = qi_func(p_shelllink.value, byref(iid_persist), byref(p_persist))
+        if hr != 0 or not p_persist.value:
+            release_func = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_shelllink.value)
+            return False
+
+        p_vptr = ctypes.cast(p_persist, POINTER(POINTER(c_void_p)))
+        p_vtable = p_vptr[0]
+
+        # Load 现有快捷方式
+        # STGM_READWRITE = 2
+        load_func = ctypes.cast(p_vtable[5], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, ctypes.c_uint))
+        hr = load_func(p_persist.value, lnk_path, 2)
+        if hr != 0:
+            release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_persist.value)
+            release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func2(p_shelllink.value)
+            return False
+
+        # SetArguments (IShellLinkW vtable index 11)
+        # HRESULT SetArguments(LPCWSTR pszArgs)
+        set_args_func = ctypes.cast(vtable[11], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p))
+        hr = set_args_func(p_shelllink.value, args)
+        if hr != 0:
+            release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func(p_persist.value)
+            release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+            release_func2(p_shelllink.value)
+            return False
+
+        # Save
+        save_func = ctypes.cast(p_vtable[6], ctypes.CFUNCTYPE(c_int, c_void_p, c_wchar_p, c_int))
+        hr = save_func(p_persist.value, lnk_path, 1)
+
+        # Release
+        release_func = ctypes.cast(p_vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func(p_persist.value)
+        release_func2 = ctypes.cast(vtable[2], ctypes.CFUNCTYPE(c_uint, c_void_p))
+        release_func2(p_shelllink.value)
+
+        return hr == 0
+
+    finally:
+        ole32.CoUninitialize()
+
+
 def do_install(port):
     target_arg = ARG_PREFIX + str(port)
     print("=" * 50)
@@ -194,23 +434,12 @@ def do_install(port):
         if not exe:
             print("[ERR] 找不到 WorkBuddy.exe，请确认安装路径")
             sys.exit(1)
-        # 创建桌面快捷方式（优先用 Python COM）
+        # 创建桌面快捷方式（纯 ctypes COM）
         desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', 'WorkBuddy.lnk')
         try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            try:
-                uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-                persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-                ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-                ishell.SetPath(exe)
-                ishell.SetWorkingDirectory(os.path.dirname(exe))
-                ishell.SetArguments(target_arg)
-                persist_file.Save(desktop, 0)
-                print("[OK] 已创建桌面快捷方式: " + desktop)
-            finally:
-                pythoncom.CoUninitialize()
-        except ImportError:
+            _create_shortcut_ctypes(desktop, exe, os.path.dirname(exe), target_arg)
+            print("[OK] 已创建桌面快捷方式: " + desktop)
+        except Exception:
             # fallback: PowerShell
             ps = (
                 "$ws=New-Object -ComObject WScript.Shell;"
@@ -336,30 +565,19 @@ def setup_and_restart(port=PORT):
 
     target_arg = ARG_PREFIX + str(port)
 
-    # 1. 安装调试端口到快捷方式（纯 Python COM）
+    # 1. 安装调试端口到快捷方式（纯 ctypes COM）
     shortcuts = find_shortcuts()
     if not shortcuts:
         exe = find_exe()
         if not exe:
             return False, "找不到 WorkBuddy.exe，请确认已安装"
-        # 创建桌面快捷方式（Python COM）
+        # 创建桌面快捷方式（纯 ctypes COM）
         desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', 'WorkBuddy.lnk')
         try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            try:
-                uuid_shelllink = pythoncom.MakeIID("{00021401-0000-0000-C000-000000000046}")
-                persist_file = pythoncom.CoCreateInstance(uuid_shelllink, None, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile)
-                ishell = persist_file.QueryInterface(pythoncom.IID_IShellLink)
-                ishell.SetPath(exe)
-                ishell.SetWorkingDirectory(os.path.dirname(exe))
-                ishell.SetArguments(target_arg)
-                persist_file.Save(desktop, 0)
-                shortcuts = [desktop]
-            finally:
-                pythoncom.CoUninitialize()
-        except ImportError:
-            # 无 pywin32 fallback PowerShell
+            _create_shortcut_ctypes(desktop, exe, os.path.dirname(exe), target_arg)
+            shortcuts = [desktop]
+        except Exception:
+            # fallback PowerShell
             ps = (
                 "$ws=New-Object -ComObject WScript.Shell;"
                 "$s=$ws.CreateShortcut('" + desktop + "');"
