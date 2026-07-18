@@ -169,7 +169,7 @@ SUPPORTED_MODELS = [
     # MiniMax
     "minimax-m3", "minimax-m2.7", "minimax-m2.5",
     # Kimi
-    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7","kimi-k3"
+    "kimi-k2.6", "kimi-k2.5", "kimi-k2.7","kimi-k3",
     # 混元
     "hy3", "hy3-preview", "hunyuan-chat", "hunyuan-2.0-thinking",
 ]
@@ -4003,7 +4003,7 @@ class ProxyServer:
             # 启动时注入当前积分到 WorkBuddy（延迟，等 WorkBuddy 页面加载）
             def _delayed_inject():
                 import time as _time
-                _time.sleep(3)
+                _time.sleep(5)
                 try:
                     balance = self.db.get_cached_credits_balance()
                     if balance >= 0:

@@ -191,30 +191,38 @@ JS_INJECT = r"""
                 }
             }
         }
-        // state patch: 基于原始值重算（支持改 ADD 值重跑）
+        // state patch: 每次注入时，从当前显示值减去上次叠加值得到真实值，再加新叠加值
         var st=f.memoizedState;
         while(st){
             var m=st.memoizedState;
             if(m&&typeof m==='object'&&m.usageLeft!==undefined){
-                // 首次：记录原始值；后续：用原始值重算
-                if(m.__realLeft === undefined){
-                    m.__realLeft = parseNum(m.usageLeft);
-                    m.__realTotal = parseNum(m.usageTotal);
-                }
-                m.usageLeft = toStr(m.__realLeft + addLeft);
-                m.usageTotal = toStr(m.__realTotal + addTotal);
+                // 计算真实值：当前显示值 - 上次叠加值
+                var curLeft = parseNum(m.usageLeft);
+                var curTotal = parseNum(m.usageTotal);
+                var prevAdd = parseNum(m.__prevAddLeft);
+                var realLeft = curLeft - prevAdd;
+                var realTotal = curTotal - prevAdd;
+                // 如果真实值为负（WorkBuddy 自己刷新过），用当前值作为真实值
+                if(realLeft < 0) realLeft = curLeft;
+                if(realTotal < 0) realTotal = curTotal;
+                // 设置新显示值
+                m.usageLeft = toStr(realLeft + addLeft);
+                m.usageTotal = toStr(realTotal + addTotal);
                 m.usageUsed = "0";
+                m.__prevAddLeft = addLeft;
                 if(NEW_ISPRO&&m.isPro!==undefined)m.isPro=true;
                 if(m.editionType!==undefined)m.editionType=NEW_EDITION;
                 if(Array.isArray(m.resources)){
                     m.resources.forEach(function(r){
                         if(r && r.left !== undefined){
-                            if(r.__realLeft === undefined){
-                                r.__realLeft = parseNum(r.left);
-                                r.__realTotal = parseNum(r.total);
-                            }
-                            r.left = r.__realLeft + addLeft;
-                            r.total = r.__realTotal + addTotal;
+                            var rCurLeft = parseNum(r.left);
+                            var rCurTotal = parseNum(r.total);
+                            var rRealLeft = rCurLeft - prevAdd;
+                            var rRealTotal = rCurTotal - prevAdd;
+                            if(rRealLeft < 0) rRealLeft = rCurLeft;
+                            if(rRealTotal < 0) rRealTotal = rCurTotal;
+                            r.left = rRealLeft + addLeft;
+                            r.total = rRealTotal + addTotal;
                         }
                     });
                 }

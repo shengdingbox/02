@@ -104,6 +104,45 @@ def main():
 
     # CLI 模式：第一个参数是 cli 子命令时，走命令行不启动 GUI
     if len(sys.argv) >= 2 and sys.argv[1] in ("info", "credits", "redeem", "start", "config", "help", "--help", "-h"):
+        # 打包后 --windows-console-mode=disable 模式下，需要动态分配控制台
+        if sys.platform == 'win32' and not sys.stdin.isatty():
+            import ctypes
+            import io
+            kernel32 = ctypes.windll.kernel32
+            # 附加到父进程的控制台（从 cmd 运行时）
+            if kernel32.AttachConsole(-1) == 0:
+                # 附加失败则分配新控制台
+                kernel32.AllocConsole()
+            # 重定向 stdout/stderr 到控制台
+            try:
+                # 打开 CONOUT$ 并重定向
+                conout = ctypes.c_void_p(kernel32.CreateFileW(
+                    b"CONOUT$\x00".decode('ascii'),
+                    0x40000000,  # GENERIC_WRITE
+                    0x00000003,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                    None,
+                    3,           # OPEN_EXISTING
+                    0,
+                    None,
+                ))
+                if conout.value:
+                    # 重定向标准输出
+                    kernel32.SetStdHandle(-11, conout)  # STD_OUTPUT_HANDLE
+                    # 重定向标准错误
+                    conerr = ctypes.c_void_p(kernel32.CreateFileW(
+                        b"CONOUT$\x00".decode('ascii'),
+                        0x40000000, 3, None, 3, 0, None,
+                    ))
+                    if conerr.value:
+                        kernel32.SetStdHandle(-12, conerr)  # STD_ERROR_HANDLE
+                    # 重新绑定 Python 的 sys.stdout/stderr
+                    sys.stdout = io.TextIOWrapper(
+                        io.FileIO(conout.value, 'w'), encoding='utf-8', errors='replace'
+                    )
+                    sys.stderr = sys.stdout
+            except Exception:
+                pass
+
         from .cli import main as cli_main
         sys.exit(cli_main())
 
