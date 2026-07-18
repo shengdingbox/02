@@ -114,10 +114,10 @@ def cmd_start(args):
     from .utils.store import load_setting
 
     port = int(load_setting("proxy_port", "8002"))
-    host = "127.0.0.1"
+    host = "0.0.0.0"
 
     print(f"端口: {port}")
-    print(f"地址: http://{host}:{port}/v1/chat/completions")
+    print(f"地址: http://127.0.0.1:{port}/v1/chat/completions")
 
     db = ProxyDatabase.get_instance()
 

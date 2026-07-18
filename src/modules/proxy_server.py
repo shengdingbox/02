@@ -1274,15 +1274,21 @@ class ProxyDatabase:
         # 最多重试 3 次，应对并发写入导致的短暂读取失败
         for attempt in range(3):
             try:
-                with open(self._db_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    if not content.strip():
-                        # 文件为空（可能正在被原子写入），等一下重试
-                        import time
-                        time.sleep(0.2 * (attempt + 1))
-                        continue
-                    # 解密并反序列化（兼容旧版明文 JSON）
-                    return _decrypt_json(content)
+                # 以二进制模式读取，避免 UTF-8 解码失败（加密内容是纯 ASCII base64，但可能混入非法字节）
+                with open(self._db_path, "rb") as f:
+                    raw_bytes = f.read()
+                if not raw_bytes.strip():
+                    import time
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                # 尝试以 UTF-8 解码（正常情况）
+                try:
+                    content = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    # UTF-8 解码失败，尝试 latin-1（逐字节映射，不会失败）
+                    content = raw_bytes.decode("latin-1")
+                # 解密并反序列化（兼容旧版明文 JSON）
+                return _decrypt_json(content)
             except (json.JSONDecodeError, ValueError) as e:
                 # JSON 解析失败（可能读到半截文件），等一下重试
                 logger.warning(f"[DB] proxy_db.db 读取失败(尝试 {attempt+1}/3): {e}")
@@ -3999,6 +4005,29 @@ class ProxyServer:
             # 启动后台健康检测线程（优化项 #17）
             self.router.start_health_check()
             logger.info(f"API 代理服务已启动: http://{self.host}:{self.port}")
+
+            # 自动生成子 API Key（如果没有）
+            try:
+                if not self.db.get_sub_api_keys():
+                    import secrets as _sec
+                    from datetime import datetime as _dt
+                    new_key = f"sk-{_sec.token_urlsafe(32)}"
+                    self.db.add_sub_api_key({
+                        "key_id": f"sk_{_sec.token_hex(4)}",
+                        "api_key": new_key,
+                        "label": "",
+                        "is_active": True,
+                        "allowed_models": [],
+                        "allowed_key_ids": [],
+                        "max_usage": 0,
+                        "used_count": 0,
+                        "rate_limit_rpm": 1000,
+                        "key_mode": 1,
+                        "created_at": _dt.now().isoformat(),
+                    })
+                    logger.info(f"[自动生成] 子 API Key: {new_key}")
+            except Exception as e:
+                logger.warning(f"自动生成子 API Key 失败: {e}")
 
             # 启动时注入当前积分到 WorkBuddy（延迟，等 WorkBuddy 页面加载）
             def _delayed_inject():
