@@ -133,14 +133,27 @@ def _encrypt_json(data) -> str:
 
 
 def _decrypt_json(text: str):
-    """将加密字符串反序列化为 Python 对象"""
+    """将加密字符串反序列化为 Python 对象
+
+    失败时抛 ValueError（被调用方捕获处理）。
+    """
     text = text.strip()
-    encrypted = base64.b64decode(text)
+    try:
+        encrypted = base64.b64decode(text)
+    except Exception:
+        # 不是有效 base64，可能是明文 JSON
+        return json.loads(text)
     decrypted = _xxtea_decrypt_bytes(encrypted, _XXTEA_KEY)
     # 前 4 字节是原始数据长度
     orig_len = int.from_bytes(decrypted[:4], 'little')
+    if orig_len <= 0 or orig_len > len(decrypted) - 4:
+        # 长度字段异常，说明密钥不对或数据损坏
+        raise ValueError(f"解密后长度字段异常: orig_len={orig_len}, data_len={len(decrypted)}")
     raw = decrypted[4:4 + orig_len]
-    return json.loads(raw.decode("utf-8"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError("解密后数据不是有效 UTF-8，可能密钥不匹配或文件损坏")
 
 
 # ─── 上游代理地址（加密隐藏，用户在UI上看不到）───
@@ -1274,49 +1287,39 @@ class ProxyDatabase:
         # 最多重试 3 次，应对并发写入导致的短暂读取失败
         for attempt in range(3):
             try:
-                # 以二进制模式读取，避免 UTF-8 解码失败
+                # 以二进制模式读取
                 with open(self._db_path, "rb") as f:
                     raw_bytes = f.read()
                 if not raw_bytes.strip():
                     import time
                     time.sleep(0.2 * (attempt + 1))
                     continue
-                # 尝试以 UTF-8 解码（正常情况，加密内容是纯 ASCII base64）
+                # 以 UTF-8 解码（加密内容是纯 ASCII base64）
                 try:
                     content = raw_bytes.decode("utf-8")
                 except UnicodeDecodeError:
-                    # UTF-8 解码失败，说明文件不是有效的加密数据
-                    # 可能是旧版本写入的二进制格式或文件损坏
-                    # 直接删除损坏的文件，返回空数据
-                    logger.warning(f"[DB] proxy_db.db 编码异常，文件可能损坏，已重置（尝试 {attempt+1}/3）")
+                    # UTF-8 解码失败 → 文件不是文本格式，直接删除重置
+                    logger.warning(f"[DB] proxy_db.db 不是有效的文本文件，已重置")
                     try:
                         os.remove(self._db_path)
                     except Exception:
                         pass
-                    return {
-                        "upstream_keys": [],
-                        "sub_api_keys": [],
-                        "request_logs": [],
-                        "daily_stats": {},
-                        "settings": {"upstream_proxy": ""},
-                    }
-                # 解密并反序列化（兼容旧版明文 JSON）
+                    break
+                # 解密并反序列化
                 return _decrypt_json(content)
-            except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
-                # JSON 解析失败或解密失败（可能读到半截文件），等一下重试
-                logger.warning(f"[DB] proxy_db.db 读取失败(尝试 {attempt+1}/3): {e}")
-                import time
-                time.sleep(0.3 * (attempt + 1))
+            except (json.JSONDecodeError, ValueError) as e:
+                # 解密失败或 JSON 解析失败 → 密钥不匹配或文件损坏，直接删除重置
+                logger.warning(f"[DB] proxy_db.db 解密失败，已重置: {e}")
+                try:
+                    os.remove(self._db_path)
+                except Exception:
+                    pass
+                break
             except Exception as e:
-                logger.error(f"[DB] proxy_db.db 读取异常: {e}")
+                # 其他异常（可能读到半截文件），等一下重试
+                logger.warning(f"[DB] proxy_db.db 读取异常(尝试 {attempt+1}/3): {e}")
                 import time
                 time.sleep(0.3 * (attempt + 1))
-        # 重试 3 次都失败，说明文件确实损坏，删除后返回空数据
-        logger.warning("[DB] proxy_db.db 读取失败3次，已重置数据文件")
-        try:
-            os.remove(self._db_path)
-        except Exception:
-            pass
         return {
             "upstream_keys": [],
             "sub_api_keys": [],
