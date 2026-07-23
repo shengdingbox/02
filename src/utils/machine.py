@@ -1,8 +1,13 @@
-"""机器码生成工具 — 基于硬件信息生成唯一机器码"""
+"""机器码生成工具 — 基于硬件信息生成唯一机器码
+
+持久化策略：
+- 首次启动时计算机器码并保存到 proxy_db.key 的 settings.machine_code 字段
+- 后续启动优先从 proxy_db.key 读取，避免因硬件信息读取顺序变化导致机器码漂移
+- 这样换网络、网卡变化都不会影响已绑定的机器码
+"""
 
 import hashlib
 import platform
-import uuid
 import os
 import logging
 
@@ -49,16 +54,6 @@ def _get_disk_serial() -> str:
     except Exception as e:
         logger.debug(f"获取磁盘序列号失败: {e}")
     return ""
-
-
-def _get_mac_address() -> str:
-    """获取第一个非回环 MAC 地址"""
-    try:
-        mac = uuid.getnode()
-        mac_str = ":".join(f"{(mac >> ele) & 0xff:02x}" for ele in range(40, -1, -8))
-        return mac_str
-    except Exception:
-        return ""
 
 
 def _get_cpu_id() -> str:
@@ -116,28 +111,79 @@ def _to_base62(num: int) -> str:
     return "".join(reversed(result))
 
 
+_cached_machine_code = None
+
+
+def _load_cached_machine_code() -> str:
+    """从 proxy_db.key 读取已保存的机器码（如果有）"""
+    try:
+        # 延迟导入，避免循环依赖
+        from ..modules.proxy_server import ProxyDatabase
+        db = ProxyDatabase.get_instance()
+        settings = db.get_settings()
+        return settings.get("machine_code", "") or ""
+    except Exception as e:
+        logger.debug(f"从 proxy_db.key 读取机器码失败: {e}")
+        return ""
+
+
+def _persist_machine_code(code: str) -> None:
+    """将机器码保存到 proxy_db.key"""
+    try:
+        from ..modules.proxy_server import ProxyDatabase
+        db = ProxyDatabase.get_instance()
+        db.update_settings({"machine_code": code})
+    except Exception as e:
+        logger.debug(f"保存机器码到 proxy_db.key 失败: {e}")
+
+
+def _compute_machine_code() -> str:
+    """根据硬件信息计算机器码（不含 MAC 地址，避免网络变化影响）
+
+    综合磁盘序列号、CPU ID、主机名，通过 SHA256 哈希后 Base62 编码。
+    """
+    parts = [
+        _get_disk_serial(),
+        _get_cpu_id(),
+        _get_hostname(),
+    ]
+    raw = "buddy|" + "|".join(parts)
+    sha256_hex = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    encoded = _to_base62(int(sha256_hex, 16))
+    return f"buddy_{encoded}"
+
+
 def get_machine_code() -> str:
     """生成当前机器的唯一机器码
 
-    综合磁盘序列号、MAC 地址、CPU ID、主机名等硬件信息，
-    通过 SHA256 生成哈希后，再用 Base62 编码缩短长度。
+    持久化逻辑：
+    1. 优先从 proxy_db.key 读取已保存的机器码
+    2. 若无记录，则基于硬件信息重新计算
+    3. 计算后立即保存到 proxy_db.key，后续启动直接复用
+
+    这样换网络、网卡变化都不会影响已绑定的机器码。
+    首次计算后缓存到内存，避免重复 IO。
 
     Returns:
         Base62 编码的机器码字符串（约 43 字符，前缀 buddy_）
     """
-    parts = [
-        _get_disk_serial(),
-        _get_mac_address(),
-        _get_cpu_id(),
-        _get_hostname(),
-        str(uuid.getnode()),  # MAC 数值形式作为兜底
-    ]
+    global _cached_machine_code
+    if _cached_machine_code is not None:
+        return _cached_machine_code
 
-    raw = "buddy|" + "|".join(parts)
-    sha256_hex = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    # 将 hex 转为大整数再 Base62 编码，长度从 64 缩短到约 43
-    encoded = _to_base62(int(sha256_hex, 16))
-    return f"buddy_{encoded}"
+    # 1. 尝试从 proxy_db.key 读取
+    cached = _load_cached_machine_code()
+    if cached:
+        _cached_machine_code = cached
+        return cached
+
+    # 2. 重新计算
+    code = _compute_machine_code()
+    _cached_machine_code = code
+
+    # 3. 保存到 proxy_db.key
+    _persist_machine_code(code)
+    return code
 
 
 def get_short_machine_code() -> str:

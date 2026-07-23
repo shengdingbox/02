@@ -464,25 +464,6 @@ class DashboardPage(QWidget):
         btn_copy_subkey.clicked.connect(self._copy_subkey)
         subkey_row.addWidget(btn_copy_subkey)
 
-        btn_regen_subkey = QPushButton("🔄 重新生成")
-        btn_regen_subkey.setCursor(Qt.PointingHandCursor)
-        btn_regen_subkey.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self._colors['accent']};
-                color: #FFFFFF;
-                border: none;
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background-color: {self._colors['accent_hover']};
-            }}
-        """)
-        btn_regen_subkey.clicked.connect(self._regen_subkey)
-        subkey_row.addWidget(btn_regen_subkey)
-
         subkey_row.addStretch()
         proxy_ctrl_layout.addLayout(subkey_row)
 
@@ -1214,45 +1195,6 @@ class DashboardPage(QWidget):
         if key and key != "sk-":
             QApplication.clipboard().setText(key)
 
-    def _regen_subkey(self):
-        """重新生成子 API Key"""
-        if not self._proxy_page:
-            return
-        reply = QMessageBox.question(
-            self, "确认",
-            "重新生成后旧的 API Key 将失效，确定继续吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        import secrets as _sec
-        from datetime import datetime
-        db = self._proxy_page._db
-
-        # 删除旧的子 key，创建新的
-        for sk in db.get_sub_api_keys():
-            db.delete_sub_api_key(sk.get("key_id", ""))
-
-        new_key = f"sk-{_sec.token_urlsafe(32)}"
-        sub_key_data = {
-            "key_id": f"sk_{_sec.token_hex(4)}",
-            "api_key": new_key,
-            "label": "",
-            "is_active": True,
-            "allowed_models": [],
-            "allowed_key_ids": [],
-            "max_usage": 0,
-            "used_count": 0,
-            "rate_limit_rpm": 1000,
-            "key_mode": 1,
-            "created_at": datetime.now().isoformat(),
-        }
-        db.add_sub_api_key(sub_key_data)
-        self._proxy_page._invalidate_proxy_auth_cache()
-        self._refresh_subkey_display()
-
     def _refresh_subkey_display(self):
         """刷新子 API Key 显示"""
         if not self._proxy_page:
@@ -1261,7 +1203,7 @@ class DashboardPage(QWidget):
         if sub_keys:
             self._subkey_label.setText(sub_keys[0].get("api_key", "sk-"))
         else:
-            self._subkey_label.setText("sk-（点击重新生成创建）")
+            self._subkey_label.setText("sk-（启动服务后自动生成）")
 
     def _open_backup_dir(self):
         """打开备份目录"""

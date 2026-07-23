@@ -53,7 +53,7 @@ def _inject_credits_to_workbuddy(credits: float):
         logger.warning(f"[WorkBuddy注入] 异常: {e}", exc_info=True)
 
 # ─── XXTEA 加密（Corrected Block TEA）—— 冷门可逆算法 ───
-# 用于 proxy_db.db 文件内容加密，纯 Python 实现，无外部依赖
+# 用于 proxy_db.key 文件内容加密，纯 Python 实现，无外部依赖
 
 _XXTEA_KEY = b"AT-XTEA-2026"  # 固定密钥
 
@@ -1265,13 +1265,38 @@ class ProxyDatabase:
         if not data_dir:
             data_dir = os.path.expanduser("~/.buddy-tool")
         os.makedirs(data_dir, exist_ok=True)
-        self._db_path = os.path.join(data_dir, "proxy_db.db")
+        self._db_path = os.path.join(data_dir, "proxy_db.key")
+        # 迁移旧的 proxy_db.db → proxy_db.key（仅首次执行）
+        self._migrate_legacy_db(data_dir)
         self._lock = threading.RLock()  # 可重入锁，避免 _save() 被已持锁的方法调用时死锁
         self._data = self._load()
         self._dirty = False  # 是否有未保存的变更
         self._save_timer = None  # 延迟保存定时器
         self._key_status_version = 0  # Key 状态变更版本号，每次状态变化 +1，ProxyRouter 据此刷新缓存
         self._sub_key_version = 0  # 子 Key 变更版本号，每次增删改 +1，ProxyRouter 据此刷新认证缓存
+
+    def _migrate_legacy_db(self, data_dir: str):
+        """如果存在旧的 proxy_db.db 且不存在 proxy_db.key，则迁移并删除旧文件"""
+        import os
+        legacy_path = os.path.join(data_dir, "proxy_db.db")
+        if not os.path.exists(legacy_path):
+            return
+        if os.path.exists(self._db_path):
+            # 新文件已存在，直接删除旧文件避免重复迁移
+            try:
+                os.remove(legacy_path)
+            except Exception:
+                pass
+            return
+        try:
+            # 复制旧文件内容到新文件
+            import shutil
+            shutil.copy2(legacy_path, self._db_path)
+            logger.info("[DB] 已从 proxy_db.db 迁移到 proxy_db.key")
+            # 删除旧文件
+            os.remove(legacy_path)
+        except Exception as e:
+            logger.warning(f"[DB] 迁移 proxy_db.db 失败: {e}")
 
     def _load(self) -> dict:
         """从文件加载数据（带重试，读取失败时重试而非返回空数据）"""
@@ -1299,7 +1324,7 @@ class ProxyDatabase:
                     content = raw_bytes.decode("utf-8")
                 except UnicodeDecodeError:
                     # UTF-8 解码失败 → 文件不是文本格式，直接删除重置
-                    logger.warning(f"[DB] proxy_db.db 不是有效的文本文件，已重置")
+                    logger.warning(f"[DB] proxy_db.key 不是有效的文本文件，已重置")
                     try:
                         os.remove(self._db_path)
                     except Exception:
@@ -1309,7 +1334,7 @@ class ProxyDatabase:
                 return _decrypt_json(content)
             except (json.JSONDecodeError, ValueError) as e:
                 # 解密失败或 JSON 解析失败 → 密钥不匹配或文件损坏，直接删除重置
-                logger.warning(f"[DB] proxy_db.db 解密失败，已重置: {e}")
+                logger.warning(f"[DB] proxy_db.key 解密失败，已重置: {e}")
                 try:
                     os.remove(self._db_path)
                 except Exception:
@@ -1317,7 +1342,7 @@ class ProxyDatabase:
                 break
             except Exception as e:
                 # 其他异常（可能读到半截文件），等一下重试
-                logger.warning(f"[DB] proxy_db.db 读取异常(尝试 {attempt+1}/3): {e}")
+                logger.warning(f"[DB] proxy_db.key 读取异常(尝试 {attempt+1}/3): {e}")
                 import time
                 time.sleep(0.3 * (attempt + 1))
         return {
@@ -3026,6 +3051,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         last_cooldown_secs = 0      # 最后一次冷却秒数（用于 Retry-After 头，优化项 #9）
         last_upstream_error_log = None  # 最后一次上游原始错误详情（仅用于本地排查日志）
         _ctx_compressed = [False]    # 上下文是否已压缩过（用 list 包装以便在嵌套函数中修改）
+        buddykey_refresh_count = 0   # 本轮请求中已向服务端获取新 BuddyKey 的次数（429/403 共享，上限 5 次）
+        MAX_BUDDYKEY_REFRESH = 5     # 单次请求最多获取新 BuddyKey 的次数
         allowed_key_ids = sub_key.get("allowed_key_ids", [])
         key_mode = sub_key.get("key_mode", 1)
 
@@ -3176,6 +3203,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                             logger.warning(f"[额度耗尽] Key {label} 额度耗尽(429/14018)，尝试获取新 BuddyKey")
                             self._add_log(event="upstream_429", sub_key=sub_key, upstream_key=upstream_key,
                                           model=model, error=f"额度耗尽，正在获取新 BuddyKey", upstream_status=429)
+                            if buddykey_refresh_count >= MAX_BUDDYKEY_REFRESH:
+                                logger.warning(f"[额度耗尽] 已达 BuddyKey 刷新上限({MAX_BUDDYKEY_REFRESH}次)，停止重试")
+                                self._send_json(502, {
+                                    "error": {
+                                        "message": "多次获取 BuddyKey 仍失败，请检查本地是否开启了代理。开启代理会导致上游地址无法被解析。",
+                                        "type": "buddykey_refresh_limit"
+                                    }
+                                })
+                                return
+                            buddykey_refresh_count += 1
                             new_key = self._refresh_buddykey()
                             if new_key:
                                 logger.info(f"[额度耗尽] 已获取新 BuddyKey，重试请求")
@@ -3253,6 +3290,26 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                                           model=model, error=error_detail, upstream_status=403)
                             # 标记为 abnormal，不再参与轮询
                             self.router.mark_key_abnormal(key_id)
+                            # 尝试从服务端获取新 BuddyKey 刷新本地 Key，刷新成功后重试请求
+                            if buddykey_refresh_count >= MAX_BUDDYKEY_REFRESH:
+                                logger.warning(f"[风控] 已达 BuddyKey 刷新上限({MAX_BUDDYKEY_REFRESH}次)，停止重试")
+                                self._send_json(502, {
+                                    "error": {
+                                        "message": "多次获取 BuddyKey 仍失败，请检查本地是否开启了代理。开启代理会导致上游地址无法被解析。",
+                                        "type": "buddykey_refresh_limit"
+                                    }
+                                })
+                                return
+                            buddykey_refresh_count += 1
+                            logger.warning(f"[风控] Key {label} 触发风控，尝试获取新 BuddyKey刷新(第{buddykey_refresh_count}次)")
+                            new_key = self._refresh_buddykey()
+                            if new_key:
+                                logger.info(f"[风控] 已获取新 BuddyKey，重试请求")
+                                # 清除已尝试的 key，让重试循环用新 key
+                                tried_key_ids.clear()
+                                continue
+                            else:
+                                logger.warning(f"[风控] 获取新 BuddyKey 失败，继续换下一个 Key")
                         elif resp.status_code == 400:
                             # 400 但不是空body也不是 input length too long — 记录真正发给上游的参数用于排查
                             code = upstream_error_log.get("code")
