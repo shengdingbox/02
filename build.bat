@@ -29,7 +29,7 @@ echo.
 
 venv\Scripts\python.exe -m nuitka ^
     --onefile ^
-    --no-docstrings ^
+    --python-flag=no_docstrings ^
     --windows-console-mode=disable ^
     --enable-plugin=pyside6 ^
     --include-data-dir=assets=assets ^
