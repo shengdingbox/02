@@ -10,24 +10,34 @@ import time
 import hmac
 import hashlib
 import logging
-import requests
+
+# 全局 Session，启用证书固定
+import requests as _requests_module
+from .ssl_pinning import install_pinning as _install_pinning
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from ._obfuscate import get as _obf_get, get_bytes as _obf_bytes
 
 logger = logging.getLogger(__name__)
 
-SERVER_BASE = "https://buddy.shengdingit.com/api"
+SERVER_BASE = _obf_get("SERVER_BASE")
 
 # AES-256-GCM 密钥（与服务端一致，hex → 32 字节）
-_AES_KEY_HEX = "38502350408f8d5011606fc186daa626196beac6a529d7b79b30e713a0c6f2f0"
-_AES_KEY = bytes.fromhex(_AES_KEY_HEX)
+_AES_KEY = bytes.fromhex(_obf_get("AES_KEY_HEX"))
 
 # HMAC-SHA256 签名
-_API_KEY = "buddy_707d23cb0832fb0f0fc4a3d7"
-_HMAC_KEY = b"db1a906d80eb73a82d3ded42ffb64be5"
+_API_KEY = _obf_get("API_KEY")
+_HMAC_KEY = _obf_bytes("HMAC_KEY")
 
 # 绕过系统代理，直连服务端
 _NO_PROXY = {"http": None, "https": None}
+
+# 全局 Session，启用证书固定
+from .ssl_pinning import install_pinning as _install_pinning
+
+_session = _requests_module.Session()
+_session.trust_env = False  # 忽略系统代理环境变量
+_install_pinning(_session)
 
 
 def _build_signed_headers() -> dict:
@@ -135,12 +145,11 @@ def get_credits(user_key: str = None) -> dict:
 
     try:
         encrypted_body = _encrypt_body(payload)
-        resp = requests.post(
+        resp = _session.post(
             url,
             data=encrypted_body,
             headers=_build_signed_headers(),
             timeout=15,
-            proxies=_NO_PROXY,
         )
         if resp.ok:
             return _decrypt_body(resp.text)
@@ -176,12 +185,11 @@ def redeem(card_key: str, user_key: str = None, operator: str = "user") -> dict:
 
     try:
         encrypted_body = _encrypt_body(payload)
-        resp = requests.post(
+        resp = _session.post(
             url,
             data=encrypted_body,
             headers=_build_signed_headers(),
             timeout=30,
-            proxies=_NO_PROXY,
         )
         # 响应始终加密
         return _decrypt_body(resp.text)
@@ -209,12 +217,11 @@ def get_buddykey(user_key: str = None) -> dict:
 
     try:
         encrypted_body = _encrypt_body(payload)
-        resp = requests.post(
+        resp = _session.post(
             url,
             data=encrypted_body,
             headers=_build_signed_headers(),
             timeout=30,
-            proxies=_NO_PROXY,
         )
         return _decrypt_body(resp.text)
     except Exception as e:
@@ -260,12 +267,11 @@ def check_version(current_version: str = "", platform: str = "win") -> dict:
 
     try:
         encrypted_body = _encrypt_body(payload)
-        resp = requests.post(
+        resp = _session.post(
             url,
             data=encrypted_body,
             headers=_build_signed_headers(),
             timeout=15,
-            proxies=_NO_PROXY,
         )
         if resp.ok:
             return _decrypt_body(resp.text)
@@ -288,12 +294,11 @@ def get_models_list() -> dict:
 
     try:
         encrypted_body = _encrypt_body(payload)
-        resp = requests.post(
+        resp = _session.post(
             url,
             data=encrypted_body,
             headers=_build_signed_headers(),
             timeout=15,
-            proxies=_NO_PROXY,
         )
         if resp.ok:
             return _decrypt_body(resp.text)
@@ -342,12 +347,11 @@ def report_usage(
 
     try:
         encrypted_body = _encrypt_body(payload)
-        resp = requests.post(
+        resp = _session.post(
             url,
             data=encrypted_body,
             headers=_build_signed_headers(),
             timeout=15,
-            proxies=_NO_PROXY,
         )
         return _decrypt_body(resp.text)
     except Exception as e:

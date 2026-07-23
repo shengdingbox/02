@@ -53,52 +53,25 @@ def _inject_credits_to_workbuddy(credits: float):
         logger.warning(f"[WorkBuddy注入] 异常: {e}", exc_info=True)
 
 # ─── XXTEA 加密（Corrected Block TEA）—— 冷门可逆算法 ───
-# 用于 proxy_db.key 文件内容加密，纯 Python 实现，无外部依赖
+# 用于 proxy_db.key 文件内容加密（AES-256-GCM + 机器绑定密钥）
 
-_XXTEA_KEY = b"AT-XTEA-2026"  # 固定密钥
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+
+# 旧版 XXTEA 密钥（仅用于读取旧格式数据时回退解密）
+from ..utils._obfuscate import get_bytes as _obf_bytes
+_XXTEA_KEY_LEGACY = _obf_bytes("XXTEA_KEY")
 
 
 def _xxtea_mx(sum_: int, y: int, z: int, p: int, key: list) -> int:
-    """XXTEA 混淆函数"""
+    """XXTEA 混淆函数（仅用于旧格式回退解密）"""
     return (
         (((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4))) ^
         ((sum_ ^ y) + (key[(p & 3) ^ (sum_ & 3)] ^ z))
     ) & 0xFFFFFFFF
 
 
-def _xxtea_encrypt_bytes(data: bytes, key: bytes) -> bytes:
-    """XXTEA 加密字节流"""
-    # 将 key 补齐到 16 字节
-    key = (key + b'\x00' * 16)[:16]
-    k = [int.from_bytes(key[i:i+4], 'little') for i in range(0, 16, 4)]
-
-    # 数据补齐到 4 字节倍数
-    pad_len = (4 - len(data) % 4) % 4
-    data += b'\x00' * pad_len
-    n = len(data) // 4
-    if n < 2:
-        # 不足 2 块时扩展到 2 块
-        data += b'\x00' * 4
-        n = 2
-
-    v = [int.from_bytes(data[i:i+4], 'little') for i in range(0, len(data), 4)]
-    DELTA = 0x9E3779B9
-    rounds = 6 + 52 // n
-    sum_ = 0
-    z = v[n - 1]
-    for _ in range(rounds):
-        sum_ = (sum_ + DELTA) & 0xFFFFFFFF
-        e = (sum_ >> 2) & 3
-        for p in range(n):
-            y = v[(p + 1) % n]
-            v[p] = (v[p] + _xxtea_mx(sum_, y, z, p, k)) & 0xFFFFFFFF
-            z = v[p]
-
-    return b''.join(vi.to_bytes(4, 'little') for vi in v)
-
-
 def _xxtea_decrypt_bytes(data: bytes, key: bytes) -> bytes:
-    """XXTEA 解密字节流"""
+    """XXTEA 解密字节流（仅用于旧格式回退解密）"""
     key = (key + b'\x00' * 16)[:16]
     k = [int.from_bytes(key[i:i+4], 'little') for i in range(0, 16, 4)]
 
@@ -122,33 +95,85 @@ def _xxtea_decrypt_bytes(data: bytes, key: bytes) -> bytes:
     return b''.join(vi.to_bytes(4, 'little') for vi in v)
 
 
+# 机器绑定密钥缓存
+_local_db_key_cache: bytes | None = None
+
+
+def _get_local_db_key() -> bytes:
+    """从机器特征派生 AES-256 密钥（32 字节）
+
+    综合磁盘序列号、CPU ID、主机名，通过 SHA-256 派生。
+    每台机器密钥不同，换机器/重装系统后旧 proxy_db.key 无法解密。
+    """
+    global _local_db_key_cache
+    if _local_db_key_cache is not None:
+        return _local_db_key_cache
+
+    from ..utils.machine import _get_disk_serial, _get_cpu_id, _get_hostname
+
+    parts = [
+        _get_disk_serial(),
+        _get_cpu_id(),
+        _get_hostname(),
+    ]
+    raw = "buddy_db|" + "|".join(parts)
+    _local_db_key_cache = hashlib.sha256(raw.encode("utf-8")).digest()
+    return _local_db_key_cache
+
+
+# 文件头标记，区分新旧格式
+_DB_MAGIC_V2 = b"BTG1"  # Buddy Tool GCM v1
+
+
 def _encrypt_json(data) -> str:
-    """将 Python 对象序列化为加密字符串（纯 Base64，无任何头部标记）"""
+    """将 Python 对象序列化为加密字符串（AES-256-GCM + 机器绑定密钥）
+
+    格式：base64( magic(4B) + nonce(12B) + ciphertext+tag )
+    """
     raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    # 将原始长度（4 字节小端序）拼在数据前面，解密后据此裁剪 padding
-    orig_len_bytes = len(raw).to_bytes(4, 'little')
-    payload = orig_len_bytes + raw
-    encrypted = _xxtea_encrypt_bytes(payload, _XXTEA_KEY)
-    return base64.b64encode(encrypted).decode("ascii")
+    key = _get_local_db_key()
+    nonce = secrets.token_bytes(12)
+    aesgcm = _AESGCM(key)
+    ct_and_tag = aesgcm.encrypt(nonce, raw, associated_data=None)
+    # cryptography 库输出: ciphertext + tag(16B)
+    payload = _DB_MAGIC_V2 + nonce + ct_and_tag
+    return base64.b64encode(payload).decode("ascii")
 
 
 def _decrypt_json(text: str):
     """将加密字符串反序列化为 Python 对象
 
+    支持：
+    - 新格式（AES-256-GCM + 机器绑定密钥，magic BTG1）
+    - 旧格式（XXTEA + 硬编码密钥，无 magic，前 4 字节是 orig_len）
+    - 明文 JSON
+
     失败时抛 ValueError（被调用方捕获处理）。
     """
     text = text.strip()
     try:
-        encrypted = base64.b64decode(text)
+        raw_bytes = base64.b64decode(text)
     except Exception:
         # 不是有效 base64，可能是明文 JSON
         return json.loads(text)
-    decrypted = _xxtea_decrypt_bytes(encrypted, _XXTEA_KEY)
-    # 前 4 字节是原始数据长度
+
+    # 检查是否是新格式（magic BTG1）
+    if raw_bytes[:4] == _DB_MAGIC_V2:
+        key = _get_local_db_key()
+        nonce = raw_bytes[4:16]        # 12 字节 nonce
+        ct_and_tag = raw_bytes[16:]    # ciphertext + tag(16B)
+        aesgcm = _AESGCM(key)
+        try:
+            plaintext = aesgcm.decrypt(nonce, ct_and_tag, associated_data=None)
+            return json.loads(plaintext.decode("utf-8"))
+        except Exception as e:
+            raise ValueError(f"AES-GCM 解密失败（可能机器已变更）: {e}")
+
+    # 旧格式：XXTEA + 硬编码密钥
+    decrypted = _xxtea_decrypt_bytes(raw_bytes, _XXTEA_KEY_LEGACY)
     orig_len = int.from_bytes(decrypted[:4], 'little')
     if orig_len <= 0 or orig_len > len(decrypted) - 4:
-        # 长度字段异常，说明密钥不对或数据损坏
-        raise ValueError(f"解密后长度字段异常: orig_len={orig_len}, data_len={len(decrypted)}")
+        raise ValueError(f"旧格式解密后长度字段异常: orig_len={orig_len}, data_len={len(decrypted)}")
     raw = decrypted[4:4 + orig_len]
     try:
         return json.loads(raw.decode("utf-8"))
@@ -1288,8 +1313,24 @@ class ProxyDatabase:
             except Exception:
                 pass
             return
+        # 读取旧文件内容，验证是否能正确解密
         try:
-            # 复制旧文件内容到新文件
+            with open(legacy_path, "rb") as f:
+                raw_bytes = f.read()
+            if not raw_bytes.strip():
+                # 旧文件为空，直接删除，不迁移
+                os.remove(legacy_path)
+                return
+            content = raw_bytes.decode("utf-8")
+            # 尝试解密验证数据完整性
+            try:
+                _decrypt_json(content)
+            except (ValueError, json.JSONDecodeError):
+                # 旧文件内容无法解密（可能是旧版本格式或损坏），直接删除不迁移
+                logger.warning("[DB] 旧 proxy_db.db 内容无法解密，直接删除不迁移")
+                os.remove(legacy_path)
+                return
+            # 验证通过，复制到新文件
             import shutil
             shutil.copy2(legacy_path, self._db_path)
             logger.info("[DB] 已从 proxy_db.db 迁移到 proxy_db.key")
@@ -1297,6 +1338,11 @@ class ProxyDatabase:
             os.remove(legacy_path)
         except Exception as e:
             logger.warning(f"[DB] 迁移 proxy_db.db 失败: {e}")
+            # 迁移失败也尝试删除旧文件，避免下次重复尝试
+            try:
+                os.remove(legacy_path)
+            except Exception:
+                pass
 
     def _load(self) -> dict:
         """从文件加载数据（带重试，读取失败时重试而非返回空数据）"""
@@ -1334,7 +1380,7 @@ class ProxyDatabase:
                 return _decrypt_json(content)
             except (json.JSONDecodeError, ValueError) as e:
                 # 解密失败或 JSON 解析失败 → 密钥不匹配或文件损坏，直接删除重置
-                logger.warning(f"[DB] proxy_db.key 解密失败，已重置: {e}")
+                logger.warning(f"[DB] proxy_db.key 解密失败，已删除并重置（首次运行或文件损坏属正常现象）: {e}")
                 try:
                     os.remove(self._db_path)
                 except Exception:

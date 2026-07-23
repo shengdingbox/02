@@ -59,7 +59,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --no-docstrings --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -102,7 +102,7 @@ jobs:
 
       - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --onefile --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          arch -x86_64 python -m nuitka --onefile --no-docstrings --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify app architecture
         run: |
@@ -146,7 +146,7 @@ jobs:
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --no-docstrings --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify ARM app architecture
         run: |
@@ -197,7 +197,7 @@ jobs:
 
       - name: Build CLI with Nuitka
         run: |
-          python -m nuitka --onefile --enable-plugin=pyside6 --include-package=charset_normalizer --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --no-docstrings --enable-plugin=pyside6 --include-package=charset_normalizer --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
 
       - name: Verify build
         run: |
