@@ -111,7 +111,7 @@ jobs:
 
       - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --plugin-enable=upx --upx-binary="$(brew --prefix upx)/bin/upx" --noinclude-dll-metadata="libcrypto.dylib" --noinclude-dll-metadata="libssl.dylib" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify app architecture
         run: |
