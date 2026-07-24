@@ -170,6 +170,40 @@ def main():
     app.setApplicationName("Buddy Tool")
     app.setOrganizationName("Buddy")
 
+    # macOS: 让程序出现在 Dock 和应用切换器中
+    # Nuitka onefile 生成的是纯可执行文件（非 .app bundle），
+    # 默认不会在 Dock 显示，用户关闭窗口后无法找到应用
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSApp, NSApplicationActivateIgnoringOtherApps
+            # 设置为普通应用（显示在 Dock 中）
+            NSApp.setActivationPolicy_(1)  # NSApplicationActivationPolicyRegular = 1
+            NSApp.activateIgnoringOtherApps_(True)
+        except ImportError:
+            # AppKit 不可用时用纯 ctypes 方式
+            try:
+                import ctypes
+                libobjc = ctypes.cdll.LoadLibrary(
+                    "/usr/lib/libobjc.dylib"
+                )
+                libobjc.objc_getClass.restype = ctypes.c_void_p
+                libobjc.sel_registerName.restype = ctypes.c_void_p
+                libobjc.objc_msgSend.restype = ctypes.c_void_p
+                libobjc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+
+                NSApp_class = libobjc.objc_getClass(b"NSApplication")
+                sel_sharedApp = libobjc.sel_registerName(b"sharedApplication")
+                ns_app = libobjc.objc_msgSend(NSApp_class, sel_sharedApp)
+
+                sel_setActivationPolicy = libobjc.sel_registerName(b"setActivationPolicy:")
+                libobjc.objc_msgSend(ns_app, sel_setActivationPolicy, 1)  # Regular
+
+                sel_activate = libobjc.sel_registerName(b"activateIgnoringOtherApps:")
+                libobjc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+                libobjc.objc_msgSend(ns_app, sel_activate, True)
+            except Exception:
+                pass
+
     # 单实例检查
     if not _check_single_instance():
         logger.info("已有 Buddy Tool 实例在运行，退出重复启动")

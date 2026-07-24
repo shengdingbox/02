@@ -13,14 +13,24 @@ if not exist "venv\Scripts\python.exe" (
     exit /b 1
 )
 
-:: 安装 Nuitka（如果没有）
+::: 安装 Nuitka（如果没有）
 venv\Scripts\pip.exe show nuitka >nul 2>nul
 if errorlevel 1 (
     echo 正在安装 Nuitka...
     venv\Scripts\pip.exe install nuitka -q
 )
 
-:: 清理旧构建
+::: 检查 UPX（压缩可执行文件，减小体积 + 增加逆向难度）
+set UPX_FLAG=
+where upx >nul 2>nul
+if %errorlevel% equ 0 (
+    echo [INFO] 找到 UPX，启用压缩
+    set "UPX_FLAG=--upx-dir=."
+) else (
+    echo [WARN] 未找到 UPX，跳过压缩（建议安装 UPX 以减小体积）
+)
+
+::: 清理旧构建
 if exist "dist\BuddyTool" rmdir /s /q dist\BuddyTool
 if exist "build" rmdir /s /q build
 
@@ -32,6 +42,7 @@ venv\Scripts\python.exe -m nuitka ^
     --python-flag=no_docstrings ^
     --windows-console-mode=disable ^
     --enable-plugin=pyside6 ^
+    %UPX_FLAG% ^
     --include-data-dir=assets=assets ^
     --include-data-dir=src\i18n=src\i18n ^
     --include-data-file=src\VERSION=src\VERSION ^
@@ -49,12 +60,12 @@ if errorlevel 1 (
 
 echo.
 echo ========================================
-echo   ✅ 打包成功！
+echo   打包成功！
 echo   输出文件: dist\BuddyTool.exe
 echo ========================================
 echo.
 
-:: 显示文件大小
+::: 显示文件大小
 for /f %%A in ('dir /b "dist\BuddyTool.exe"') do echo 文件: %%A
 
 echo.

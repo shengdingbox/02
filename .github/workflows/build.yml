@@ -57,9 +57,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install UPX
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          version: latest
+
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --windows-console-mode=disable --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --windows-console-mode=disable --enable-plugin=pyside6 --upx-dir="." --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool.exe" --assume-yes-for-downloads app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -70,9 +75,10 @@ jobs:
 
   build-macos-intel:
     if: ${{ github.event_name == 'push' || inputs.build_macos }}
-    runs-on: macos-14
+    runs-on: macos-13
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MACOSX_DEPLOYMENT_TARGET: "13"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,6 +101,9 @@ jobs:
           arch -x86_64 python -m pip install --upgrade pip
           arch -x86_64 python -m pip install -r requirements.txt
 
+      - name: Install UPX
+        run: brew install upx
+
       - name: Verify Python runs as x86_64
         run: |
           arch -x86_64 python -c "import platform; print(f'Python arch: {platform.machine()}')"
@@ -102,7 +111,7 @@ jobs:
 
       - name: Build with Nuitka (x86_64 via Rosetta)
         run: |
-          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          arch -x86_64 python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --upx-dir="$(brew --prefix upx)/bin" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify app architecture
         run: |
@@ -117,9 +126,10 @@ jobs:
 
   build-macos-arm:
     if: ${{ github.event_name == 'push' || inputs.build_macos }}
-    runs-on: macos-14
+    runs-on: macos-13
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MACOSX_DEPLOYMENT_TARGET: "13"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -140,13 +150,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install UPX
+        run: brew install upx
+
       - name: Verify native ARM Python
         run: |
           test "$(python -c 'import platform; print(platform.machine())')" = "arm64"
 
       - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --upx-dir="$(brew --prefix upx)/bin" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="BuddyTool" --assume-yes-for-downloads app.py
 
       - name: Verify ARM app architecture
         run: |
@@ -195,9 +208,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install UPX
+        run: sudo apt-get install -y -q upx-ucl
+
       - name: Build CLI with Nuitka
         run: |
-          python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --include-package=charset_normalizer --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
+          python -m nuitka --onefile --python-flag=no_docstrings --enable-plugin=pyside6 --include-package=charset_normalizer --upx-dir="/usr/bin" --include-data-dir=assets=assets --include-data-dir=src/i18n=src/i18n --include-data-file=src/VERSION=src/VERSION --output-dir=dist --output-filename="buddy-tool" --assume-yes-for-downloads app.py
 
       - name: Verify build
         run: |
