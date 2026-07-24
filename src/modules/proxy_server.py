@@ -2665,7 +2665,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             # 刷新路由器缓存
             self.router.invalidate_upstream_cache()
 
-            logger.info(f"[BuddyKey刷新] 已替换上游 Key，新余额: {result.get('balance', 0):.1f}")
+            # 同步积分到本地缓存（关键！否则请求时会因余额为 0 被拒绝）
+            balance = float(result.get("balance", 0))
+            db.save_cached_credits({"credits": balance})
+
+            logger.info(f"[BuddyKey刷新] 已替换上游 Key，新余额: {balance:.1f}")
             return buddy_key
         except Exception as e:
             logger.error(f"[BuddyKey刷新] 异常: {e}")

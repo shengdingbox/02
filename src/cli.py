@@ -132,6 +132,23 @@ def cmd_start(args):
             buddy_key = result.get("buddyKey", "")
             balance = result.get("balance", 0)
             print(f"✅ 获取 BuddyKey 成功，余额: {balance}")
+
+            # 保存上游 Key 到数据库
+            import secrets as _sec
+            from datetime import datetime as _dt
+            db.add_upstream_key({
+                "key_id": f"bk_{_sec.token_hex(4)}",
+                "api_key": buddy_key,
+                "label": f"BuddyKey (余额 {balance:.1f})",
+                "status": "active",
+                "used_count": 0,
+                "points": str(balance),
+                "points_updated_at": _dt.now().isoformat(),
+                "created_at": _dt.now().isoformat(),
+            })
+
+            # 同步积分到本地缓存（关键！否则请求时会因余额为 0 被拒绝）
+            db.save_cached_credits({"credits": float(balance)})
         else:
             err = result.get("error") or result.get("message") or "未知错误"
             print(f"❌ 获取 BuddyKey 失败: {err}")
