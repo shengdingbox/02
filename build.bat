@@ -25,7 +25,7 @@ set UPX_FLAG=
 where upx >nul 2>nul
 if %errorlevel% equ 0 (
     echo [INFO] 找到 UPX，启用压缩
-    set "UPX_FLAG=--upx-dir=."
+    set "UPX_FLAG=--plugin-enable=upx"
 ) else (
     echo [WARN] 未找到 UPX，跳过压缩（建议安装 UPX 以减小体积）
 )
